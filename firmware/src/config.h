@@ -74,6 +74,18 @@
 #define PIN_LED        -1
 #define PIN_RGB_LED    48
 #define PIN_AI_CHAT_SW -1
+#elif defined(BOARD_PROFILE_IDEVICE_S3)
+#define PIN_EPD_MOSI   11
+#define PIN_EPD_SCK    12
+#define PIN_EPD_CS     10
+#define PIN_EPD_DC     13
+#define PIN_EPD_RST    14
+#define PIN_EPD_BUSY   15
+#define PIN_BAT_ADC    4
+#define PIN_CFG_BTN    0
+#define PIN_LED        -1
+#define PIN_RGB_LED    48
+#define PIN_AI_CHAT_SW -1
 #else
 #error "Unsupported board profile"
 #endif
@@ -99,11 +111,11 @@
 
 static const int W = EPD_WIDTH;
 static const int H = EPD_HEIGHT;
-static const int ROW_BYTES   = W / 8;
+static const int ROW_BYTES   = (W + 7) / 8;   // round up: the 2.13" panel is 250 px wide
 static const int ROW_STRIDE  = (ROW_BYTES + 3) & ~3;  // BMP row stride (4-byte aligned)
 static const int IMG_BUF_LEN = ROW_BYTES * H;
 /** Preprocessor image buffer size for #if (IMG_BUF_LEN is not a cpp constant). */
-#define INKSIGHT_IMG_BUF_BYTES_MACRO ((EPD_WIDTH / 8) * (EPD_HEIGHT))
+#define INKSIGHT_IMG_BUF_BYTES_MACRO (((EPD_WIDTH + 7) / 8) * (EPD_HEIGHT))
 
 #ifndef EPD_BPP
 #define EPD_BPP 1
