@@ -1,0 +1,114 @@
+name: Build InkSight Firmware
+
+on:
+  workflow_dispatch:
+    inputs:
+      env:
+        description: '屏幕型号 + 主控板'
+        required: true
+        default: 'epd_42_hink_idevice_s3_n16r8'
+        type: choice
+        options:
+          # ── iDevice ESP32-S3 N16R8（引脚 SCK=12 MOSI=11 CS=10 DC=13 RST=14 BUSY=15）──
+          - epd_42_hink_idevice_s3_n16r8       # 4.2" HINK SSD1683 · 400x300 · iDevice S3
+          - epd_213_idevice_s3                 # 2.13" 250x122 SSD1680 · iDevice S3（先试这个）
+          - epd_213_uc8151_idevice_s3          # 2.13" 250x122 UC8151 · iDevice S3（白屏时换）
+          # ── YD ESP32-S3 N16R8（引脚 DC=9 RST=8 BUSY=7）──
+          - epd_42_wsv2_ssd1683_yd_s3_n16r8    # 4.2" 微雪 V2 SSD1683 · YD S3
+          # ── ESP32-C3 ──
+          - epd_42_wsv2_ssd1683_c3_promini     # 4.2" 微雪 V2 SSD1683 · C3
+          - epd_42_depg0420ry683_ssd1683_c3_promini  # 4.2" DKE RY683 · C3
+          - epd_29_c3_promini                  # 2.9" 296x128 · C3
+          - epd_583_uc8179_c3_promini          # 5.83" UC8179 · C3
+          - epd_75_c3_promini                  # 7.5" · C3
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安装 PlatformIO
+        run: |
+          python -m pip install --upgrade pip
+          pip install --upgrade platformio
+
+      - name: 锁定 espressif32 版本
+        # 新版框架的 setCACertBundle() 由 1 参数变 2 参数，会导致编译失败
+        run: |
+          if grep -qE '^platform = espressif32$' firmware/platformio.ini; then
+            sed -i 's/^platform = espressif32$/platform = espressif32@6.9.0/' firmware/platformio.ini
+            echo "已锁定 espressif32@6.9.0"
+          else
+            grep -nE '^platform *=' firmware/platformio.ini || true
+          fi
+
+      - name: 缓存 PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            firmware/.pio
+          key: pio-${{ runner.os }}-${{ inputs.env }}-${{ hashFiles('firmware/platformio.ini', 'firmware/boards/*.ini') }}
+          restore-keys: |
+            pio-${{ runner.os }}-${{ inputs.env }}-
+            pio-${{ runner.os }}-
+
+      - name: 校验环境
+        run: |
+          ENV="${{ inputs.env }}"
+          cd firmware
+          if ! pio project config 2>/dev/null | grep -qE "^env:${ENV}$"; then
+            echo "::error::环境 ${ENV} 不存在，可用环境："
+            pio project config 2>/dev/null | grep -oE '^env:[^ ]+' | sed 's/^env://' | sort
+            exit 1
+          fi
+          case "$ENV" in
+            *_idevice_s3*)  echo "::notice::iDevice S3 板（GPIO13=DC，仅一个 Type-C，日志走 USB）" ;;
+            *_yd_s3_n16r8*) echo "::notice::ESP32-S3 固件，请确认板子是 S3" ;;
+            *_c3_*)         echo "::notice::ESP32-C3 固件，请确认板子是 C3" ;;
+            *_wroom02*|*_wroom32e*) echo "::notice::ESP32-WROOM 固件" ;;
+          esac
+          echo "ENV=$ENV" >> "$GITHUB_ENV"
+
+      - name: 编译
+        working-directory: firmware
+        run: |
+          pio run -e "$ENV" 2>&1 | tee build.log
+
+      - name: 失败时打印错误摘要
+        if: failure()
+        working-directory: firmware
+        run: |
+          echo "=========== 错误行 ==========="
+          grep -inE "error|failed|unknown|not found" build.log | head -40 || true
+          echo "=========== 日志尾部 ==========="
+          tail -80 build.log || true
+
+      - name: 收集产物
+        if: success()
+        run: |
+          mkdir -p out
+          B="firmware/.pio/build/${ENV}"
+          for f in firmware.bin firmware_merged.bin bootloader.bin partitions.bin boot_app0.bin; do
+            if [ -f "$B/$f" ]; then
+              cp "$B/$f" "out/${ENV}_${f}"
+            fi
+          done
+          ls -lh out
+          echo "烧录用 *_merged.bin，地址 0x0"
+
+      - name: 上传产物
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: inksight-${{ inputs.env }}
+          path: out/
+          retention-days: 30
