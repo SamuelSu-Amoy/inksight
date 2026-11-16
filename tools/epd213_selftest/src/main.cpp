@@ -74,12 +74,12 @@ static bool waitBusy(const char *tag, uint32_t timeoutMs = 15000) {
   uint32_t t0 = millis();
   while (digitalRead(EPD_BUSY) == HIGH) {
     if (millis() - t0 > timeoutMs) {
-      Serial.printf("[BUSY] %s 超时！BUSY 一直为高\n", tag);
+      Serial.printf("[BUSY] %s TIMEOUT: BUSY stuck HIGH\n", tag);
       return false;
     }
     delay(5);
   }
-  Serial.printf("[BUSY] %s 完成，用时 %lu ms\n", tag, (unsigned long)(millis() - t0));
+  Serial.printf("[BUSY] %s done in %lu ms\n", tag, (unsigned long)(millis() - t0));
   return true;
 }
 
@@ -104,14 +104,14 @@ static void epdReset() {
 // ── 初始化（SSD1680 序列）──────────────────────────────────
 static bool epdInit() {
   Serial.println("---- EPD init ----");
-  Serial.printf("[PIN] BUSY 初始电平 = %d (空闲应为 0)\n", digitalRead(EPD_BUSY));
+  Serial.printf("[PIN] BUSY at boot = %d (idle should be 0)\n", digitalRead(EPD_BUSY));
 
   epdReset();
-  traceBusy("复位后 1s");
+  traceBusy("after reset");
   waitBusy("hw reset", 5000);
 
   cmd(0x12);                 // 软件复位
-  traceBusy("软复位后 1s");
+  traceBusy("after sw reset");
   delay(10);
   if (!waitBusy("sw reset", 5000)) return false;
 
@@ -128,14 +128,14 @@ static bool epdInit() {
 
   cmd(0x22); data(0xB1);     // 载入 OTP 波形 + 上电
   cmd(0x20);
-  traceBusy("上电后 1s");
+  traceBusy("after power on");
   return waitBusy("power on", 10000);
 }
 
 // ── 写整帧并刷新 ────────────────────────────────────────────
 static bool epdShow(const uint8_t *bw, const uint8_t *red,
                     const char *tag, bool fullRefresh = true) {
-  Serial.printf("---- 刷新：%s ----\n", tag);
+  Serial.printf("---- refresh: %s ----\n", tag);
 
   cmd(0x4E); data(0x00);                    // X 计数器 = 0
   cmd(0x4F); data(0xF9); data(0x00);        // Y 计数器 = 249
@@ -186,18 +186,18 @@ static void sampleBusy(const char *tag, uint8_t mode, int n = 50) {
     if (digitalRead(EPD_BUSY) == HIGH) hi++;
     delay(1);
   }
-  Serial.printf("[DIAG] %-16s 高电平 %2d/%d  %s\n", tag, hi, n,
-                (hi == 0) ? "→ 低" : (hi == n) ? "→ 高" : "→ 抖动");
+  Serial.printf("[DIAG] %-16s high %2d/%d  %s\n", tag, hi, n,
+                (hi == 0) ? "-> LOW" : (hi == n) ? "-> HIGH" : "-> FLOAT");
 }
 
 static void diagnoseBusy() {
-  Serial.println("==== BUSY 引脚诊断 (GPIO15) ====");
-  sampleBusy("纯输入 INPUT", INPUT);
-  sampleBusy("上拉 INPUT_PULLUP", INPUT_PULLUP);
-  sampleBusy("下拉 INPUT_PULLDOWN", INPUT_PULLDOWN);
-  Serial.println("  判读：上拉变高 + 下拉变低 = 引脚悬空（屏没接上）");
-  Serial.println("        三者都低 = 屏在拉低（正常空闲）");
-  Serial.println("        三者都高 = 屏在拉高（异常/复位未完成）");
+  Serial.println("==== BUSY pin diagnostics (GPIO15) ====");
+  sampleBusy("INPUT", INPUT);
+  sampleBusy("INPUT_PULLUP", INPUT_PULLUP);
+  sampleBusy("INPUT_PULLDOWN", INPUT_PULLDOWN);
+  Serial.println("  PULLUP high + PULLDOWN low = pin floating (panel not connected)");
+  Serial.println("  all LOW  = panel pulls low (normal idle)");
+  Serial.println("  all HIGH = panel pulls high (abnormal)");
   Serial.println("================================");
   pinMode(EPD_BUSY, INPUT);
 }
@@ -208,7 +208,7 @@ void setup() {
   delay(1500);
   Serial.println();
   Serial.println("==========================================");
-  Serial.println("  iDevice 2.13\" EPD 点屏测试");
+  Serial.println("  iDevice 2.13\" EPD bring-up test");
   Serial.println("==========================================");
 
   pinMode(EPD_SCK,  OUTPUT);
@@ -229,38 +229,38 @@ void setup() {
   fillRED(0x00);
 
   if (!epdInit()) {
-    Serial.println("!! 初始化失败，屏没有响应。");
-    Serial.println("   检查：FPC 插紧 / 3V3 供电 / BUSY 那根线");
-    Serial.println("   （loop 已停止刷新，重新插好按 RST 即可）");
+    Serial.println("!! init FAILED: panel not responding.");
+    Serial.println("   check: FPC seated / 3V3 / BUSY wire");
+    Serial.println("   (loop stopped, re-seat and press RST)");
     return;
   }
   g_ok = true;
-  Serial.println(">> 初始化成功");
+  Serial.println(">> init OK");
 
   fillBW(0xFF); fillRED(0x00);
-  epdShow(bufBW, bufRED, "全白", true);   // 首帧用全刷，清掉上电残影
+  epdShow(bufBW, bufRED, "white", true);   // 首帧用全刷，清掉上电残影
   delay(2000);
 
   fillBW(0x00); fillRED(0x00);
-  epdShow(bufBW, bufRED, "全黑", false);
+  epdShow(bufBW, bufRED, "black", false);
   delay(2000);
 
   drawChecker();
   fillRED(0x00);
-  epdShow(bufBW, bufRED, "8x8 棋盘", true);
+  epdShow(bufBW, bufRED, "checker", true);
   delay(2000);
 
   drawBars();
   fillRED(0x00);
-  epdShow(bufBW, bufRED, "横向条纹", true);
+  epdShow(bufBW, bufRED, "bars", true);
   delay(2000);
 
   // 三色屏才会真的出红；黑白屏这一帧仍显示上一张
   fillBW(0xFF); fillRED(0xFF);
-  epdShow(bufBW, bufRED, "全红（仅三色屏可见）", true);
+  epdShow(bufBW, bufRED, "red (3-colour only)", true);
   delay(3000);
 
-  Serial.println(">> 测试结束，进入循环：白 → 黑 → 棋盘（每 5 秒）");
+  Serial.println(">> done, looping white/black/checker every 5s");
 }
 
 // ── loop：持续循环，方便观察 ────────────────────────────────
@@ -271,14 +271,14 @@ void loop() {
   }
 
   fillBW(0xFF); fillRED(0x00);
-  epdShow(bufBW, bufRED, "loop 全白", false);
+  epdShow(bufBW, bufRED, "loop white", false);
   delay(5000);
 
   fillBW(0x00); fillRED(0x00);
-  epdShow(bufBW, bufRED, "loop 全黑", false);
+  epdShow(bufBW, bufRED, "loop black", false);
   delay(5000);
 
   drawChecker(); fillRED(0x00);
-  epdShow(bufBW, bufRED, "loop 棋盘", true);
+  epdShow(bufBW, bufRED, "loop checker", true);
   delay(5000);
 }
