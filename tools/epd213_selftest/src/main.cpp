@@ -68,13 +68,30 @@ static inline void data(uint8_t d) {
   digitalWrite(EPD_CS, HIGH);
 }
 
+// ── BUSY 极性 ───────────────────────────────────────────────
+// SSD1680 手册写的是「高 = 忙」，但实测这块屏复位后一直保持高、
+// 收到 0x12 后反而变低 —— 说明它的 BUSY 是反相的（低 = 忙）。
+// 这里在启动时自动判定，也可以用 -DBUSY_ACTIVE_HIGH 强制。
+#if defined(BUSY_ACTIVE_HIGH)
+static bool g_busyHigh = true;
+#elif defined(BUSY_ACTIVE_LOW)
+static bool g_busyHigh = false;
+#else
+static bool g_busyHigh = true;      // autodetectPolarity() 会覆盖
+#endif
+
 // ── BUSY 等待（带超时和日志，白屏诊断全靠它）───────────────
-// SSD1680：BUSY 高 = 忙
+static bool busyIsBusy() {
+  return g_busyHigh ? (digitalRead(EPD_BUSY) == HIGH)
+                    : (digitalRead(EPD_BUSY) == LOW);
+}
+
 static bool waitBusy(const char *tag, uint32_t timeoutMs = 15000) {
   uint32_t t0 = millis();
-  while (digitalRead(EPD_BUSY) == HIGH) {
+  while (busyIsBusy()) {
     if (millis() - t0 > timeoutMs) {
-      Serial.printf("[BUSY] %s TIMEOUT: BUSY stuck HIGH\n", tag);
+      Serial.printf("[BUSY] %s TIMEOUT: busy level stuck (%s)\n",
+                    tag, g_busyHigh ? "HIGH" : "LOW");
       return false;
     }
     delay(5);
@@ -85,7 +102,7 @@ static bool waitBusy(const char *tag, uint32_t timeoutMs = 15000) {
 
 // ── 复位 ────────────────────────────────────────────────────
 // 复位前后各采 1 秒 BUSY 电平，看屏有没有反应
-static void traceBusy(const char *tag, int ms = 1000) {
+static void traceBusy(const char *tag, int ms = 3000) {
   Serial.printf("[TRACE] %-12s: ", tag);
   int n = ms / 100;
   for (int i = 0; i < n; i++) {
@@ -99,6 +116,29 @@ static void epdReset() {
   digitalWrite(EPD_RST, HIGH); delay(20);
   digitalWrite(EPD_RST, LOW);  delay(20);
   digitalWrite(EPD_RST, HIGH); delay(50);
+}
+
+// ── BUSY 极性自动判定 ──────────────────────────────────────
+// 复位后连续 3 秒观察：若一直保持高，说明「高」其实是空闲状态，
+// 也就是这块屏的忙电平是低（与 SSD1680 手册相反）。
+static void autodetectPolarity() {
+#if defined(BUSY_ACTIVE_HIGH) || defined(BUSY_ACTIVE_LOW)
+  Serial.printf("[POL] fixed by build flag: busy = %s\n", g_busyHigh ? "HIGH" : "LOW");
+  return;
+#else
+  pinMode(EPD_BUSY, INPUT);
+  epdReset();
+  uint32_t t0 = millis();
+  int hi = 0, n = 0;
+  while (millis() - t0 < 3000) {
+    if (digitalRead(EPD_BUSY) == HIGH) hi++;
+    n++;
+    delay(5);
+  }
+  g_busyHigh = (hi < n * 0.9);
+  Serial.printf("[POL] after reset: HIGH %d/%d -> busy level = %s (auto)\n",
+                hi, n, g_busyHigh ? "HIGH" : "LOW");
+#endif
 }
 
 // ── 初始化（SSD1680 序列）──────────────────────────────────
@@ -223,6 +263,7 @@ void setup() {
   digitalWrite(EPD_DC, HIGH);
 
   diagnoseBusy();        // 先判断 BUSY 这根线到底有没有接上
+  autodetectPolarity();  // 再判定这块屏的 BUSY 极性（高忙还是低忙）
 
   // 第一张图给纯白清屏，避免旧残影干扰判断
   fillBW(0xFF);
