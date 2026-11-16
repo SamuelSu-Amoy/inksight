@@ -84,6 +84,17 @@ static bool waitBusy(const char *tag, uint32_t timeoutMs = 15000) {
 }
 
 // ── 复位 ────────────────────────────────────────────────────
+// 复位前后各采 1 秒 BUSY 电平，看屏有没有反应
+static void traceBusy(const char *tag, int ms = 1000) {
+  Serial.printf("[TRACE] %-12s: ", tag);
+  int n = ms / 100;
+  for (int i = 0; i < n; i++) {
+    Serial.print(digitalRead(EPD_BUSY) == HIGH ? '1' : '0');
+    delay(100);
+  }
+  Serial.println();
+}
+
 static void epdReset() {
   digitalWrite(EPD_RST, HIGH); delay(20);
   digitalWrite(EPD_RST, LOW);  delay(20);
@@ -96,9 +107,11 @@ static bool epdInit() {
   Serial.printf("[PIN] BUSY 初始电平 = %d (空闲应为 0)\n", digitalRead(EPD_BUSY));
 
   epdReset();
+  traceBusy("复位后 1s");
   waitBusy("hw reset", 5000);
 
   cmd(0x12);                 // 软件复位
+  traceBusy("软复位后 1s");
   delay(10);
   if (!waitBusy("sw reset", 5000)) return false;
 
@@ -115,6 +128,7 @@ static bool epdInit() {
 
   cmd(0x22); data(0xB1);     // 载入 OTP 波形 + 上电
   cmd(0x20);
+  traceBusy("上电后 1s");
   return waitBusy("power on", 10000);
 }
 
@@ -161,6 +175,33 @@ static void drawBars() {
   }
 }
 
+// ── BUSY 引脚诊断：三态采样，判断引脚是否悬空 ──────────────
+// 悬空引脚会跟着上下拉走：PULLUP 时全高、PULLDOWN 时全低。
+// 屏真的接着的话，电平不会因为内部上下拉而翻转。
+static void sampleBusy(const char *tag, uint8_t mode, int n = 50) {
+  pinMode(EPD_BUSY, mode);
+  delay(10);
+  int hi = 0;
+  for (int i = 0; i < n; i++) {
+    if (digitalRead(EPD_BUSY) == HIGH) hi++;
+    delay(1);
+  }
+  Serial.printf("[DIAG] %-16s 高电平 %2d/%d  %s\n", tag, hi, n,
+                (hi == 0) ? "→ 低" : (hi == n) ? "→ 高" : "→ 抖动");
+}
+
+static void diagnoseBusy() {
+  Serial.println("==== BUSY 引脚诊断 (GPIO15) ====");
+  sampleBusy("纯输入 INPUT", INPUT);
+  sampleBusy("上拉 INPUT_PULLUP", INPUT_PULLUP);
+  sampleBusy("下拉 INPUT_PULLDOWN", INPUT_PULLDOWN);
+  Serial.println("  判读：上拉变高 + 下拉变低 = 引脚悬空（屏没接上）");
+  Serial.println("        三者都低 = 屏在拉低（正常空闲）");
+  Serial.println("        三者都高 = 屏在拉高（异常/复位未完成）");
+  Serial.println("================================");
+  pinMode(EPD_BUSY, INPUT);
+}
+
 // ── setup ───────────────────────────────────────────────────
 void setup() {
   Serial.begin(115200);
@@ -180,6 +221,8 @@ void setup() {
   digitalWrite(EPD_CS, HIGH);
   digitalWrite(EPD_SCK, LOW);
   digitalWrite(EPD_DC, HIGH);
+
+  diagnoseBusy();        // 先判断 BUSY 这根线到底有没有接上
 
   // 第一张图给纯白清屏，避免旧残影干扰判断
   fillBW(0xFF);
