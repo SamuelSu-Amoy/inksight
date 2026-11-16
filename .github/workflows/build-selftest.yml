@@ -1,0 +1,65 @@
+name: Build EPD213 Selftest
+
+# 单独编一个 2.13" 墨水屏的点屏自检固件（最小工程，不带 InkSight 业务逻辑）
+# 产物：epd213_selftest_merged.bin（烧 0x0）
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安装 PlatformIO
+        run: |
+          python -m pip install --upgrade pip
+          pip install -U platformio esptool
+
+      - name: 缓存 PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-selftest-${{ runner.os }}-${{ hashFiles('tools/epd213_selftest/platformio.ini') }}
+          restore-keys: pio-selftest-${{ runner.os }}-
+
+      - name: 编译
+        working-directory: tools/epd213_selftest
+        run: pio run
+
+      - name: 合并成单文件并收集
+        working-directory: tools/epd213_selftest
+        run: |
+          B=.pio/build/epd213_selftest_s3
+          mkdir -p ../../out
+          cp "$B/firmware.bin"    ../../out/epd213_selftest_firmware.bin
+          cp "$B/bootloader.bin"  ../../out/epd213_selftest_bootloader.bin
+          cp "$B/partitions.bin"  ../../out/epd213_selftest_partitions.bin
+
+          MERGE_ARGS="0x0 $B/bootloader.bin 0x8000 $B/partitions.bin"
+          if [ -f "$B/boot_app0.bin" ]; then
+            MERGE_ARGS="$MERGE_ARGS 0xe000 $B/boot_app0.bin"
+          fi
+          MERGE_ARGS="$MERGE_ARGS 0x10000 $B/firmware.bin"
+
+          python -m esptool --chip esp32s3 merge_bin \
+            -o ../../out/epd213_selftest_merged.bin \
+            --flash_mode qio --flash_freq 80m --flash_size 16MB \
+            $MERGE_ARGS
+
+          ls -lh ../../out
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: epd213-selftest
+          path: out/
+          retention-days: 30
