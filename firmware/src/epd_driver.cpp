@@ -833,6 +833,50 @@ void epdSleep() {
           }
       }
   }
+  #define EPD_ACTIVE_W GxEPD2_290_GDEY029T94::WIDTH
+  #define EPD_ACTIVE_H GxEPD2_290_GDEY029T94::HEIGHT
+#elif defined(EPD_PANEL_213)
+  // 2.13" 250x122 landscape layout; the glass is 122x250 portrait, so the frame
+  // has to be rotated just like the 2.9" one.
+  // SSD1680 is the default; -DEPD_213_UC8151 selects the UC8151 variant.
+  #if defined(EPD_213_UC8151)
+    #include <epd/GxEPD2_213.h>
+    typedef GxEPD2_213 EPD213Type;
+  #else
+    #include <epd/GxEPD2_213_B74.h>
+    typedef GxEPD2_213_B74 EPD213Type;
+  #endif
+  GxEPD2_BW<EPD213Type, EPD213Type::HEIGHT> display(
+      EPD213Type(PIN_EPD_CS, PIN_EPD_DC, PIN_EPD_RST, PIN_EPD_BUSY));
+  // The rotated frame is PANEL_W x PANEL_H (122x250), which is NOT the same byte
+  // count as the landscape IMG_BUF_LEN when the width is not a multiple of 8
+  // (250 -> 32 B/row vs 122 -> 16 B/row * 250 rows). Size it explicitly.
+  static const size_t ROT_BUF_LEN = ((EPD213Type::WIDTH + 7) / 8) * EPD213Type::HEIGHT;
+  static uint8_t rotated_buffer[ROT_BUF_LEN];
+
+  static bool is_black_pixel(const uint8_t* buffer, int width, int x, int y) {
+      int row_bytes = (width + 7) / 8;
+      return (buffer[y * row_bytes + x / 8] & (0x80 >> (x % 8))) == 0;
+  }
+
+  static void set_black_pixel(uint8_t* buffer, int width, int x, int y) {
+      int row_bytes = (width + 7) / 8;
+      buffer[y * row_bytes + x / 8] &= ~(0x80 >> (x % 8));
+  }
+
+  static void rotate_landscape_to_panel(const uint8_t* source) {
+      memset(rotated_buffer, 0xFF, sizeof(rotated_buffer));
+      for (int src_y = 0; src_y < H; src_y++) {
+          for (int src_x = 0; src_x < W; src_x++) {
+              if (!is_black_pixel(source, W, src_x, src_y)) continue;
+              int dst_x = src_y;
+              int dst_y = W - 1 - src_x;
+              set_black_pixel(rotated_buffer, EPD213Type::WIDTH, dst_x, dst_y);
+          }
+      }
+  }
+  #define EPD_ACTIVE_W EPD213Type::WIDTH
+  #define EPD_ACTIVE_H EPD213Type::HEIGHT
 #elif defined(EPD_PANEL_583_UC8179)
   #include <gdeq/GxEPD2_583_GDEQ0583T31.h>
   GxEPD2_BW<GxEPD2_583_GDEQ0583T31, GxEPD2_583_GDEQ0583T31::HEIGHT / 4> display(
@@ -862,7 +906,13 @@ static const uint8_t DISPLAY_ROTATION =
 
 void gpioInit() {
     pinMode(PIN_CFG_BTN, INPUT_PULLUP);
+#if defined(BOARD_PROFILE_IDEVICE_S3)
+    // GPIO13 is the EPD DC line on this board, so SPI must never fall back to it as
+    // the default FSPI MISO. GPIO21 is unused and only acts as a no-connect input.
+    SPI.begin(PIN_EPD_SCK, 21, PIN_EPD_MOSI, PIN_EPD_CS);
+#else
     SPI.begin(PIN_EPD_SCK, -1, PIN_EPD_MOSI, PIN_EPD_CS);
+#endif
 }
 
 void epdInit() {
@@ -880,14 +930,14 @@ void epdInitFast() {
 
 void epdDisplay(const uint8_t *image) {
     epdInit();
-#if defined(EPD_PANEL_29)
+#if defined(EPD_PANEL_29) || defined(EPD_PANEL_213)
     rotate_landscape_to_panel(image);
     display.writeImage(
         rotated_buffer,
         0,
         0,
-        GxEPD2_290_GDEY029T94::WIDTH,
-        GxEPD2_290_GDEY029T94::HEIGHT,
+        EPD_ACTIVE_W,
+        EPD_ACTIVE_H,
         false,
         false,
         false
@@ -917,14 +967,14 @@ void epdDisplayFast(const uint8_t *image) {
     return;
 #endif
     epdInit();
-#if defined(EPD_PANEL_29)
+#if defined(EPD_PANEL_29) || defined(EPD_PANEL_213)
     rotate_landscape_to_panel(image);
     display.writeImage(
         rotated_buffer,
         0,
         0,
-        GxEPD2_290_GDEY029T94::WIDTH,
-        GxEPD2_290_GDEY029T94::HEIGHT,
+        EPD_ACTIVE_W,
+        EPD_ACTIVE_H,
         false,
         false,
         false
@@ -958,7 +1008,7 @@ void epdPartialDisplay(uint8_t *data, int xStart, int yStart, int xEnd, int yEnd
 }
 
 bool epdSupportsPartialRefresh() {
-#if defined(EPD_PANEL_29)
+#if defined(EPD_PANEL_29) || defined(EPD_PANEL_213)
     return false;
 #else
     return true;
@@ -967,7 +1017,7 @@ bool epdSupportsPartialRefresh() {
 
 void epdPartialDisplayWithOld(uint8_t *data, const uint8_t *oldData, int xStart, int yStart, int xEnd, int yEnd) {
     epdInit();
-#if defined(EPD_PANEL_29)
+#if defined(EPD_PANEL_29) || defined(EPD_PANEL_213)
     (void)data;
     (void)oldData;
     (void)xStart;
@@ -979,8 +1029,8 @@ void epdPartialDisplayWithOld(uint8_t *data, const uint8_t *oldData, int xStart,
         rotated_buffer,
         0,
         0,
-        GxEPD2_290_GDEY029T94::WIDTH,
-        GxEPD2_290_GDEY029T94::HEIGHT,
+        EPD_ACTIVE_W,
+        EPD_ACTIVE_H,
         false,
         false,
         false
