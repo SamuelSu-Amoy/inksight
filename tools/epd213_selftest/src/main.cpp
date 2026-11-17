@@ -88,11 +88,17 @@ static bool busyIsBusy() {
 
 static bool waitBusy(const char *tag, uint32_t timeoutMs = 15000) {
   uint32_t t0 = millis();
+  uint32_t nextLog = 5000;
   while (busyIsBusy()) {
-    if (millis() - t0 > timeoutMs) {
-      Serial.printf("[BUSY] %s TIMEOUT: busy level stuck (%s)\n",
-                    tag, g_busyHigh ? "HIGH" : "LOW");
+    uint32_t el = millis() - t0;
+    if (el > timeoutMs) {
+      Serial.printf("[BUSY] %s TIMEOUT after %lu ms: still busy (%s)\n",
+                    tag, (unsigned long)el, g_busyHigh ? "HIGH" : "LOW");
       return false;
+    }
+    if (el >= nextLog) {
+      Serial.printf("[BUSY] %s still busy at %lu ms\n", tag, (unsigned long)el);
+      nextLog += 5000;
     }
     delay(5);
   }
@@ -113,9 +119,12 @@ static void traceBusy(const char *tag, int ms = 3000) {
 }
 
 static void epdReset() {
+  Serial.printf("[RST] before: BUSY=%d\n", digitalRead(EPD_BUSY));
   digitalWrite(EPD_RST, HIGH); delay(20);
   digitalWrite(EPD_RST, LOW);  delay(20);
+  Serial.printf("[RST] while LOW: BUSY=%d\n", digitalRead(EPD_BUSY));
   digitalWrite(EPD_RST, HIGH); delay(50);
+  Serial.printf("[RST] after HIGH: BUSY=%d\n", digitalRead(EPD_BUSY));
 }
 
 // ── BUSY 极性自动判定 ──────────────────────────────────────
@@ -153,7 +162,7 @@ static bool epdInit() {
   cmd(0x12);                 // 软件复位
   traceBusy("after sw reset");
   delay(10);
-  if (!waitBusy("sw reset", 5000)) return false;
+  if (!waitBusy("sw reset", 30000)) return false;
 
   cmd(0x01);                 // 驱动输出控制：MUX = 250 - 1
   data(0xF9); data(0x00); data(0x00);
