@@ -33,12 +33,16 @@
 #define EPD_RST   14
 #define EPD_BUSY  15
 
-// ── 面板几何 ────────────────────────────────────────────────
-// 2.13" 面板原生是 122(宽) x 250(高) 竖屏
+// ── 面板几何（编译期可覆盖：-DPANEL_W=400 -DPANEL_H=300）────
+// 默认 2.13"：面板原生 122(宽) x 250(高) 竖屏
+#ifndef PANEL_W
 #define PANEL_W    122
+#endif
+#ifndef PANEL_H
 #define PANEL_H    250
-#define ROW_BYTES  ((PANEL_W + 7) / 8)     // 16 字节/行
-#define BUF_LEN    (ROW_BYTES * PANEL_H)   // 4000 字节
+#endif
+#define ROW_BYTES  ((PANEL_W + 7) / 8)
+#define BUF_LEN    (ROW_BYTES * PANEL_H)
 
 static uint8_t bufBW[BUF_LEN];    // 黑白平面：0 = 黑，1 = 白
 static uint8_t bufRED[BUF_LEN];   // 红色平面：1 = 红，0 = 不显示红
@@ -178,13 +182,18 @@ static bool epdInit() {
   delay(10);
   if (!waitBusy("sw reset", 30000)) return false;
 
-  cmd(0x01);                 // 驱动输出控制：MUX = 250 - 1
-  data(0xF9); data(0x00); data(0x00);
+  const uint16_t y_end = PANEL_H - 1;
+  const uint8_t  x_end = (uint8_t)(ROW_BYTES - 1);
+  Serial.printf("[GEO] panel %dx%d, row_bytes=%d, buf=%d, y_end=%u\n",
+                PANEL_W, PANEL_H, ROW_BYTES, BUF_LEN, y_end);
+
+  cmd(0x01);                 // 驱动输出控制：MUX = H - 1
+  data(y_end & 0xFF); data(y_end >> 8); data(0x00);
 
   cmd(0x11); data(0x03);     // 数据入口：X 递增，Y 递减
 
-  cmd(0x44); data(0x00); data(0x0F);        // RAM X 起止：0 ~ 15
-  cmd(0x45); data(0xF9); data(0x00);        // RAM Y 起止：249 ~ 0
+  cmd(0x44); data(0x00); data(x_end);              // RAM X 起止
+  cmd(0x45); data(y_end & 0xFF); data(y_end >> 8); // RAM Y 起止
 
   cmd(0x3C); data(0x05);     // 边框波形
   cmd(0x18); data(0x80);     // 内部温度传感器
@@ -240,7 +249,7 @@ static bool epdShow(const uint8_t *bw, const uint8_t *red,
 
   // ── SSD1680 ──
   cmd(0x4E); data(0x00);
-  cmd(0x4F); data(0xF9); data(0x00);
+  cmd(0x4F); data((PANEL_H - 1) & 0xFF); data((PANEL_H - 1) >> 8);
   cmd(0x24); dataBuf(bw, BUF_LEN);
   if (red) { cmd(0x26); dataBuf(red, BUF_LEN); }
   cmd(0x22); data(fullRefresh ? 0xF7 : 0xFF);
@@ -301,7 +310,7 @@ void setup() {
   delay(1500);
   Serial.println();
   Serial.println("==========================================");
-  Serial.println("  iDevice 2.13\" EPD bring-up test");
+  Serial.printf("  iDevice EPD bring-up test (%dx%d)\n", PANEL_W, PANEL_H);
   Serial.println("==========================================");
 
   pinMode(EPD_SCK,  OUTPUT);
