@@ -38,23 +38,25 @@ jobs:
       - name: 合并成单文件并收集
         working-directory: tools/epd213_selftest
         run: |
-          B=.pio/build/epd213_selftest_s3
           mkdir -p ../../out
-          cp "$B/firmware.bin"    ../../out/epd213_selftest_firmware.bin
-          cp "$B/bootloader.bin"  ../../out/epd213_selftest_bootloader.bin
-          cp "$B/partitions.bin"  ../../out/epd213_selftest_partitions.bin
+          for ENVN in epd213_selftest_s3 epd42_selftest_s3; do
+            B=".pio/build/$ENVN"
+            [ -d "$B" ] || { echo "skip $ENVN"; continue; }
+            cp "$B/firmware.bin"    "../../out/${ENVN}_firmware.bin"
+            cp "$B/bootloader.bin"  "../../out/${ENVN}_bootloader.bin"
+            cp "$B/partitions.bin"  "../../out/${ENVN}_partitions.bin"
 
-          MERGE_ARGS="0x0 $B/bootloader.bin 0x8000 $B/partitions.bin"
-          if [ -f "$B/boot_app0.bin" ]; then
-            MERGE_ARGS="$MERGE_ARGS 0xe000 $B/boot_app0.bin"
-          fi
-          MERGE_ARGS="$MERGE_ARGS 0x10000 $B/firmware.bin"
+            ARGS="0x0 $B/bootloader.bin 0x8000 $B/partitions.bin"
+            if [ -f "$B/boot_app0.bin" ]; then
+              ARGS="$ARGS 0xe000 $B/boot_app0.bin"
+            fi
+            ARGS="$ARGS 0x10000 $B/firmware.bin"
 
-          python -m esptool --chip esp32s3 merge_bin \
-            -o ../../out/epd213_selftest_merged.bin \
-            --flash_mode dio --flash_freq 80m --flash_size 16MB \
-            $MERGE_ARGS
-
+            python -m esptool --chip esp32s3 merge_bin \
+              -o "../../out/${ENVN}_merged.bin" \
+              --flash_mode dio --flash_freq 80m --flash_size 16MB \
+              $ARGS
+          done
           ls -lh ../../out
 
       - name: 上传产物
