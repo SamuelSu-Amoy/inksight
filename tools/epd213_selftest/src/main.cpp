@@ -43,6 +43,7 @@
 static uint8_t bufBW[BUF_LEN];    // 黑白平面：0 = 黑，1 = 白
 static uint8_t bufRED[BUF_LEN];   // 红色平面：1 = 红，0 = 不显示红
 static bool    g_ok = false;      // 初始化是否成功（失败后 loop 不再刷屏）
+static int     g_proto = 0;       // 1 = SSD1680, 2 = UC8151
 
 // ── 底层 SPI（软件模拟）─────────────────────────────────────
 static inline void spiByte(uint8_t b) {
@@ -65,6 +66,13 @@ static inline void data(uint8_t d) {
   digitalWrite(EPD_DC, HIGH);      // DC=HIGH → 数据
   digitalWrite(EPD_CS, LOW);
   spiByte(d);
+  digitalWrite(EPD_CS, HIGH);
+}
+
+static void dataBuf(const uint8_t *buf, int len) {
+  digitalWrite(EPD_DC, HIGH);
+  digitalWrite(EPD_CS, LOW);
+  for (int i = 0; i < len; i++) spiByte(buf[i]);
   digitalWrite(EPD_CS, HIGH);
 }
 
@@ -127,27 +135,16 @@ static void epdReset() {
   Serial.printf("[RST] after HIGH: BUSY=%d\n", digitalRead(EPD_BUSY));
 }
 
-// ── BUSY 极性自动判定 ──────────────────────────────────────
-// 复位后连续 3 秒观察：若一直保持高，说明「高」其实是空闲状态，
-// 也就是这块屏的忙电平是低（与 SSD1680 手册相反）。
+// ── BUSY 极性 ──────────────────────────────────────────────
+// 实测：空闲 = 低，复位/刷新期间 = 高（与 SSD1680 手册一致）。
+// 自动判定会误判（复位可能超过观察窗口），所以这里固定。
 static void autodetectPolarity() {
-#if defined(BUSY_ACTIVE_HIGH) || defined(BUSY_ACTIVE_LOW)
-  Serial.printf("[POL] fixed by build flag: busy = %s\n", g_busyHigh ? "HIGH" : "LOW");
-  return;
+#if defined(BUSY_ACTIVE_LOW)
+  g_busyHigh = false;
 #else
-  pinMode(EPD_BUSY, INPUT);
-  epdReset();
-  uint32_t t0 = millis();
-  int hi = 0, n = 0;
-  while (millis() - t0 < 3000) {
-    if (digitalRead(EPD_BUSY) == HIGH) hi++;
-    n++;
-    delay(5);
-  }
-  g_busyHigh = (hi < n * 0.9);
-  Serial.printf("[POL] after reset: HIGH %d/%d -> busy level = %s (auto)\n",
-                hi, n, g_busyHigh ? "HIGH" : "LOW");
+  g_busyHigh = true;
 #endif
+  Serial.printf("[POL] busy level = %s (fixed)\n", g_busyHigh ? "HIGH" : "LOW");
 }
 
 // ── 初始化（SSD1680 序列）──────────────────────────────────
@@ -157,7 +154,7 @@ static bool epdInit() {
 
   epdReset();
   traceBusy("after reset");
-  waitBusy("hw reset", 5000);
+  waitBusy("hw reset", 20000);
 
   cmd(0x12);                 // 软件复位
   traceBusy("after sw reset");
@@ -175,10 +172,37 @@ static bool epdInit() {
   cmd(0x3C); data(0x05);     // 边框波形
   cmd(0x18); data(0x80);     // 内部温度传感器
 
-  cmd(0x22); data(0xB1);     // 载入 OTP 波形 + 上电
+  // ── 协议探测：同一个 0x12 两种芯片都认，但后续命令完全不同 ──
+  // 如果屏是 UC8151，SSD1680 的 0x01/0x11/0x44/0x45/0x22/0x20 会被全部忽略，
+  // 表现就是「命令发了，BUSY 一点不动」—— 正是之前看到的现象。
+  Serial.println("[PROTO] trying SSD1680 sequence");
+  cmd(0x01); data(0xF9); data(0x00); data(0x00);
+  cmd(0x11); data(0x03);
+  cmd(0x44); data(0x00); data(0x0F);
+  cmd(0x45); data(0xF9); data(0x00);
+  cmd(0x3C); data(0x05);
+  cmd(0x18); data(0x80);
+  cmd(0x22); data(0xB1);
   cmd(0x20);
-  traceBusy("after power on");
-  return waitBusy("power on", 10000);
+  if (waitBusy("SSD1680 pwr", 4000)) {
+    g_proto = 1;
+    Serial.println("[PROTO] SSD1680 OK");
+    return true;
+  }
+
+  Serial.println("[PROTO] SSD1680 silent -> trying UC8151 sequence");
+  cmd(0x00); data(0x1F); data(0x0D);                          // panel setting
+  cmd(0x01); data(0x03); data(0x00); data(0x32); data(0x32); data(0x01);  // power setting
+  cmd(0x06); data(0xC7); data(0xC7); data(0xC7);              // booster
+  cmd(0x04);                                                   // power on
+  if (waitBusy("UC8151 pwr", 4000)) {
+    g_proto = 2;
+    Serial.println("[PROTO] UC8151 OK");
+    return true;
+  }
+
+  Serial.println("[PROTO] neither SSD1680 nor UC8151 responded");
+  return false;
 }
 
 // ── 写整帧并刷新 ────────────────────────────────────────────
@@ -186,21 +210,22 @@ static bool epdShow(const uint8_t *bw, const uint8_t *red,
                     const char *tag, bool fullRefresh = true) {
   Serial.printf("---- refresh: %s ----\n", tag);
 
-  cmd(0x4E); data(0x00);                    // X 计数器 = 0
-  cmd(0x4F); data(0xF9); data(0x00);        // Y 计数器 = 249
-
-  cmd(0x24);                                // 写黑白 RAM
-  for (int i = 0; i < BUF_LEN; i++) data(bw[i]);
-
-  if (red) {                                // 写红色 RAM（三色屏才有意义）
-    cmd(0x26);
-    for (int i = 0; i < BUF_LEN; i++) data(red[i]);
+  if (g_proto == 2) {                       // ── UC8151 ──
+    cmd(0x10); data(0x01); dataBuf(bw, BUF_LEN);
+    if (red) { cmd(0x13); data(0x01); dataBuf(red, BUF_LEN); }
+    cmd(0x11); data(0x01);
+    bool ok = waitBusy(tag, 30000);
+    cmd(0x12);
+    return ok;
   }
 
-  cmd(0x22);                                // 显示更新
-  data(fullRefresh ? 0xF7 : 0xFF);
+  // ── SSD1680 ──
+  cmd(0x4E); data(0x00);
+  cmd(0x4F); data(0xF9); data(0x00);
+  cmd(0x24); dataBuf(bw, BUF_LEN);
+  if (red) { cmd(0x26); dataBuf(red, BUF_LEN); }
+  cmd(0x22); data(fullRefresh ? 0xF7 : 0xFF);
   cmd(0x20);
-
   return waitBusy(tag, 30000);
 }
 
