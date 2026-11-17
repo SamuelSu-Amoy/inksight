@@ -780,6 +780,166 @@ void epdSleep() {
     EPD_Send_1(0x07, 0xA5); // deep sleep
 }
 
+#elif defined(EPD_PANEL_213)
+// ═════════════════════════════════════════════════════════════
+// 2.13"  UC8151D  裸驱动（软件 SPI）
+//
+// 参数全部取自板上原厂 MicroPython 驱动（已实测点亮）：
+//   Panel Setting  : 0x00 <- 0x0F      (LUT from OTP, BWR)
+//   RAM X          : 0x44 <- 0x00 0x0F (16 字节 = 128 像素)
+//   RAM Y          : 0x45 <- 0x00 0x00 0xF9 0x00
+//   Counter        : 0x4E / 0x4F
+//   VCOM & interval: 0x50 <- 0x11 0x07
+//   Power On       : 0x04
+//   写黑白         : 0x10   (1 = 白, 0 = 黑)
+//   刷新           : 0x12
+//   BUSY           : 低 = 忙，引脚内部上拉
+// ═════════════════════════════════════════════════════════════
+
+static void ucByte(uint8_t b) {
+    for (int i = 0; i < 8; i++) {
+        digitalWrite(PIN_EPD_MOSI, (b & 0x80) ? HIGH : LOW);
+        b <<= 1;
+        digitalWrite(PIN_EPD_SCK, HIGH);
+        digitalWrite(PIN_EPD_SCK, LOW);
+    }
+}
+
+static void ucCmd(uint8_t c) {
+    digitalWrite(PIN_EPD_DC, LOW);
+    digitalWrite(PIN_EPD_CS, LOW);
+    ucByte(c);
+    digitalWrite(PIN_EPD_CS, HIGH);
+}
+
+static void ucData(uint8_t d) {
+    digitalWrite(PIN_EPD_DC, HIGH);
+    digitalWrite(PIN_EPD_CS, LOW);
+    ucByte(d);
+    digitalWrite(PIN_EPD_CS, HIGH);
+}
+
+static void ucDataBuf(const uint8_t *buf, int len) {
+    digitalWrite(PIN_EPD_DC, HIGH);
+    digitalWrite(PIN_EPD_CS, LOW);
+    for (int i = 0; i < len; i++) ucByte(buf[i]);
+    digitalWrite(PIN_EPD_CS, HIGH);
+}
+
+// 原厂驱动：while busy.value() == 0  → 低电平表示忙
+static bool ucWaitBusy(const char *tag, uint32_t timeoutMs = 30000) {
+    uint32_t t0 = millis();
+    while (digitalRead(PIN_EPD_BUSY) == LOW) {
+        if (millis() - t0 > timeoutMs) {
+            Serial.printf("[EPD] %s busy timeout (%lu ms)\n", tag, (unsigned long)(millis() - t0));
+            return false;
+        }
+        delay(5);
+    }
+    Serial.printf("[EPD] %s ok, %lu ms\n", tag, (unsigned long)(millis() - t0));
+    return true;
+}
+
+static bool g_uc_ready = false;
+
+void gpioInit() {
+    pinMode(PIN_EPD_CS,   OUTPUT);
+    pinMode(PIN_EPD_DC,   OUTPUT);
+    pinMode(PIN_EPD_RST,  OUTPUT);
+    pinMode(PIN_EPD_SCK,  OUTPUT);
+    pinMode(PIN_EPD_MOSI, OUTPUT);
+    pinMode(PIN_EPD_BUSY, INPUT_PULLUP);   // 原厂也是上拉
+    pinMode(PIN_CFG_BTN,  INPUT_PULLUP);
+    digitalWrite(PIN_EPD_CS,  HIGH);
+    digitalWrite(PIN_EPD_RST, HIGH);
+    digitalWrite(PIN_EPD_DC,  LOW);
+    digitalWrite(PIN_EPD_SCK, LOW);
+}
+
+void epdInit() {
+    if (g_uc_ready) return;
+
+    digitalWrite(PIN_EPD_RST, LOW);
+    delay(50);
+    digitalWrite(PIN_EPD_RST, HIGH);
+    delay(50);
+    ucWaitBusy("reset", 5000);
+
+    ucCmd(0x00); ucData(0x0F);                        // panel setting: LUT from OTP, BWR
+    ucCmd(0x44); ucData(0x00); ucData(0x0F);          // RAM X 0..15
+    {
+        uint16_t yend = EPD_HEIGHT - 1;
+        ucCmd(0x45);
+        ucData(0x00); ucData(0x00);
+        ucData(yend & 0xFF); ucData((yend >> 8) & 0x01);
+    }
+    ucCmd(0x4E); ucData(0x00);
+    ucCmd(0x4F); ucData(0x00); ucData(0x00);
+    ucCmd(0x50); ucData(0x11); ucData(0x07);          // VCOM & data interval
+    ucCmd(0x04);                                      // power on
+    ucWaitBusy("power on", 15000);
+
+    g_uc_ready = true;
+    Serial.printf("[EPD] UC8151D ready, %dx%d, buf %d\n", EPD_WIDTH, EPD_HEIGHT, IMG_BUF_LEN);
+}
+
+void epdInitFast() { epdInit(); }
+
+void epdDisplay(const uint8_t *image) {
+    epdInit();
+
+    ucCmd(0x4E); ucData(0x00);
+    ucCmd(0x4F); ucData(0x00); ucData(0x00);
+    ucCmd(0x10); ucDataBuf(image, IMG_BUF_LEN);       // 黑白平面
+    ucCmd(0x12);                                      // display refresh
+    delay(10);
+    ucWaitBusy("refresh", 30000);
+}
+
+void epdDisplayFast(const uint8_t *image) { epdDisplay(image); }
+
+void epdDisplayDeepClear(const uint8_t *image) {
+    epdInit();
+    uint8_t *buf = (uint8_t *)malloc(IMG_BUF_LEN);
+    if (buf) {
+        for (int pass = 0; pass < 4; pass++) {
+            memset(buf, (pass % 2 == 0) ? 0x00 : 0xFF, IMG_BUF_LEN);
+            ucCmd(0x4E); ucData(0x00);
+            ucCmd(0x4F); ucData(0x00); ucData(0x00);
+            ucCmd(0x10); ucDataBuf(buf, IMG_BUF_LEN);
+            ucCmd(0x12); delay(10);
+            ucWaitBusy("deep clear", 30000);
+        }
+        free(buf);
+    }
+    epdDisplay(image);
+}
+
+void epdDisplay2bpp(const uint8_t *image2bpp) {
+    (void)image2bpp;   // 这块屏是 BWR，InkSight 的 2bpp 管线不适用
+}
+
+bool epdSupportsPartialRefresh() { return false; }
+
+void epdPartialDisplay(uint8_t *data, int xStart, int yStart, int xEnd, int yEnd) {
+    (void)data; (void)xStart; (void)yStart; (void)xEnd; (void)yEnd;
+    epdDisplay(imgBuf);      // 不支持局刷，整屏重绘
+}
+
+void epdPartialDisplayWithOld(uint8_t *data, const uint8_t *oldData,
+                              int xStart, int yStart, int xEnd, int yEnd) {
+    (void)data; (void)oldData; (void)xStart; (void)yStart; (void)xEnd; (void)yEnd;
+    epdDisplay(imgBuf);
+}
+
+void epdSleep() {
+    ucCmd(0x50); ucData(0xF7);
+    ucCmd(0x02);                                      // power off
+    ucWaitBusy("power off", 5000);
+    ucCmd(0x07); ucData(0xA5);                        // deep sleep
+    g_uc_ready = false;
+}
+
 #else
 // ── Other panel sizes: GxEPD2 (hardware SPI) ─────────────────
 
