@@ -114,6 +114,23 @@ static bool waitBusy(const char *tag, uint32_t timeoutMs = 15000) {
   return true;
 }
 
+// ── 探测：发命令后看 BUSY 会不会被拉高 ────────────────────
+// 关键：不能只看「BUSY 变低」——它本来就是低的，那样任何命令都算成功。
+// 上电类命令一定会把 BUSY 拉高一段时间，这才是「屏响应了」的证据。
+static bool probeBusyRise(const char *tag, uint32_t windowMs = 800) {
+  uint32_t t0 = millis();
+  while (millis() - t0 < windowMs) {
+    if (digitalRead(EPD_BUSY) == HIGH) {
+      Serial.printf("[PROBE] %s -> BUSY rose after %lu ms\n", tag,
+                    (unsigned long)(millis() - t0));
+      return true;
+    }
+    delay(2);
+  }
+  Serial.printf("[PROBE] %s -> no BUSY rise in %lu ms\n", tag, (unsigned long)windowMs);
+  return false;
+}
+
 // ── 复位 ────────────────────────────────────────────────────
 // 复位前后各采 1 秒 BUSY 电平，看屏有没有反应
 static void traceBusy(const char *tag, int ms = 3000) {
@@ -172,10 +189,22 @@ static bool epdInit() {
   cmd(0x3C); data(0x05);     // 边框波形
   cmd(0x18); data(0x80);     // 内部温度传感器
 
-  // ── 协议探测：同一个 0x12 两种芯片都认，但后续命令完全不同 ──
-  // 如果屏是 UC8151，SSD1680 的 0x01/0x11/0x44/0x45/0x22/0x20 会被全部忽略，
-  // 表现就是「命令发了，BUSY 一点不动」—— 正是之前看到的现象。
-  Serial.println("[PROTO] trying SSD1680 sequence");
+  // ── 协议探测 ────────────────────────────────────────────
+  // 先试 UC8151：0x04 (power on) 一定会把 BUSY 拉高
+  Serial.println("[PROTO] trying UC8151: 0x00 panel setting + 0x04 power on");
+  cmd(0x00); data(0x1F); data(0x0D);
+  cmd(0x01); data(0x03); data(0x00); data(0x32); data(0x32); data(0x01);
+  cmd(0x06); data(0xC7); data(0xC7); data(0xC7);
+  cmd(0x04);
+  if (probeBusyRise("UC8151 0x04")) {
+    g_proto = 2;
+    Serial.println("[PROTO] UC8151 OK");
+    waitBusy("UC8151 pwr settle", 15000);
+    return true;
+  }
+
+  // 再试 SSD1680：0x22 0xB1 + 0x20
+  Serial.println("[PROTO] trying SSD1680: 0x22 0xB1 + 0x20");
   cmd(0x01); data(0xF9); data(0x00); data(0x00);
   cmd(0x11); data(0x03);
   cmd(0x44); data(0x00); data(0x0F);
@@ -184,24 +213,14 @@ static bool epdInit() {
   cmd(0x18); data(0x80);
   cmd(0x22); data(0xB1);
   cmd(0x20);
-  if (waitBusy("SSD1680 pwr", 4000)) {
+  if (probeBusyRise("SSD1680 0x22/0x20")) {
     g_proto = 1;
     Serial.println("[PROTO] SSD1680 OK");
+    waitBusy("SSD1680 pwr settle", 15000);
     return true;
   }
 
-  Serial.println("[PROTO] SSD1680 silent -> trying UC8151 sequence");
-  cmd(0x00); data(0x1F); data(0x0D);                          // panel setting
-  cmd(0x01); data(0x03); data(0x00); data(0x32); data(0x32); data(0x01);  // power setting
-  cmd(0x06); data(0xC7); data(0xC7); data(0xC7);              // booster
-  cmd(0x04);                                                   // power on
-  if (waitBusy("UC8151 pwr", 4000)) {
-    g_proto = 2;
-    Serial.println("[PROTO] UC8151 OK");
-    return true;
-  }
-
-  Serial.println("[PROTO] neither SSD1680 nor UC8151 responded");
+  Serial.println("[PROTO] neither UC8151 nor SSD1680 responded");
   return false;
 }
 
