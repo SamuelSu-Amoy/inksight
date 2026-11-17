@@ -11,8 +11,7 @@ on:
         options:
           # ── iDevice ESP32-S3 N16R8（引脚 SCK=12 MOSI=11 CS=10 DC=13 RST=14 BUSY=15）──
           - epd_42_hink_idevice_s3_n16r8       # 4.2" HINK SSD1683 · 400x300 · iDevice S3
-          - epd_213_idevice_s3                 # 2.13" 250x122 SSD1680 · iDevice S3（先试这个）
-          - epd_213_uc8151_idevice_s3          # 2.13" 250x122 UC8151 · iDevice S3（白屏时换）
+          - epd_213_idevice_s3                 # 2.13" UC8151D · iDevice S3（参数取自原厂驱动）
           # ── YD ESP32-S3 N16R8（引脚 DC=9 RST=8 BUSY=7）──
           - epd_42_wsv2_ssd1683_yd_s3_n16r8    # 4.2" 微雪 V2 SSD1683 · YD S3
           # ── ESP32-C3 ──
