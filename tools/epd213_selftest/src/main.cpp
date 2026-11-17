@@ -121,13 +121,23 @@ static bool waitBusy(const char *tag, uint32_t timeoutMs = 15000) {
 // ── 探测：发命令后看 BUSY 会不会被拉高 ────────────────────
 // 关键：不能只看「BUSY 变低」——它本来就是低的，那样任何命令都算成功。
 // 上电类命令一定会把 BUSY 拉高一段时间，这才是「屏响应了」的证据。
-static bool probeBusyRise(const char *tag, uint32_t windowMs = 800) {
+static bool probeBusyRise(const char *tag, uint32_t windowMs = 500) {
   uint32_t t0 = millis();
   while (millis() - t0 < windowMs) {
     if (digitalRead(EPD_BUSY) == HIGH) {
-      Serial.printf("[PROBE] %s -> BUSY rose after %lu ms\n", tag,
-                    (unsigned long)(millis() - t0));
-      return true;
+      uint32_t rose = millis() - t0;
+      // 真响应会持续一段时间再回落；只抖一下就回去的多半是噪声
+      uint32_t t1 = millis();
+      uint32_t held = 0;
+      while (millis() - t1 < 3000) {
+        if (digitalRead(EPD_BUSY) == HIGH) { held = millis() - t1; }
+        else if (held > 20) break;          // 抬起来过又落了 → 真响应
+        delay(2);
+      }
+      Serial.printf("[PROBE] %s -> rise@%lu ms, held %lu ms %s\n", tag,
+                    (unsigned long)rose, (unsigned long)held,
+                    held > 20 ? "OK" : "(too short, ignore)");
+      return held > 20;
     }
     delay(2);
   }
@@ -198,9 +208,24 @@ static bool epdInit() {
   cmd(0x3C); data(0x05);     // 边框波形
   cmd(0x18); data(0x80);     // 内部温度传感器
 
-  // ── 协议探测 ────────────────────────────────────────────
-  // 先试 UC8151：0x04 (power on) 一定会把 BUSY 拉高
-  Serial.println("[PROTO] trying UC8151: 0x00 panel setting + 0x04 power on");
+  // ── 协议探测：SSD1680/1683 优先（HINK 4.2 就是这一类）──
+  Serial.println("[PROTO] #1 trying SSD1680/1683: 0x22 0xB1 + 0x20");
+  cmd(0x01); data(y_end & 0xFF); data(y_end >> 8); data(0x00);
+  cmd(0x11); data(0x03);
+  cmd(0x44); data(0x00); data(x_end);
+  cmd(0x45); data(y_end & 0xFF); data(y_end >> 8);
+  cmd(0x3C); data(0x05);
+  cmd(0x18); data(0x80);
+  cmd(0x22); data(0xB1);
+  cmd(0x20);
+  if (probeBusyRise("SSD1680/1683")) {
+    g_proto = 1;
+    Serial.println("[PROTO] SSD1680/1683 OK");
+    waitBusy("pwr settle", 15000);
+    return true;
+  }
+
+  Serial.println("[PROTO] #2 trying UC8151: 0x04 power on");
   cmd(0x00); data(0x1F); data(0x0D);
   cmd(0x01); data(0x03); data(0x00); data(0x32); data(0x32); data(0x01);
   cmd(0x06); data(0xC7); data(0xC7); data(0xC7);
@@ -208,24 +233,7 @@ static bool epdInit() {
   if (probeBusyRise("UC8151 0x04")) {
     g_proto = 2;
     Serial.println("[PROTO] UC8151 OK");
-    waitBusy("UC8151 pwr settle", 15000);
-    return true;
-  }
-
-  // 再试 SSD1680：0x22 0xB1 + 0x20
-  Serial.println("[PROTO] trying SSD1680: 0x22 0xB1 + 0x20");
-  cmd(0x01); data(0xF9); data(0x00); data(0x00);
-  cmd(0x11); data(0x03);
-  cmd(0x44); data(0x00); data(0x0F);
-  cmd(0x45); data(0xF9); data(0x00);
-  cmd(0x3C); data(0x05);
-  cmd(0x18); data(0x80);
-  cmd(0x22); data(0xB1);
-  cmd(0x20);
-  if (probeBusyRise("SSD1680 0x22/0x20")) {
-    g_proto = 1;
-    Serial.println("[PROTO] SSD1680 OK");
-    waitBusy("SSD1680 pwr settle", 15000);
+    waitBusy("pwr settle", 15000);
     return true;
   }
 
