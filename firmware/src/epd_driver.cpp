@@ -36,20 +36,13 @@ static bool g_busyHigh = true;
 
 static void epdDetectBusyPolarity() {
 #if defined(BOARD_PROFILE_IDEVICE_S3)
+    // iDevice 板：SSD1619 / SSD1683 系列固定「高 = 忙」。
+    // 之前的自动判定在复位窗口不够时会误判（2.13 那块屏已经踩过一次），
+    // 直接固定极性，只在日志里打印一次真实电平。
+    g_busyHigh = true;
     pinMode(PIN_EPD_BUSY, INPUT_PULLUP);
-    delay(100);
-    int idle = digitalRead(PIN_EPD_BUSY);
-
-    digitalWrite(PIN_EPD_RST, LOW);  delay(20);
-    digitalWrite(PIN_EPD_RST, HIGH); delay(120);
-    int after = digitalRead(PIN_EPD_BUSY);
-
-    if (idle != after) {
-        g_busyHigh = (after == HIGH);
-    }
-    Serial.printf("[EPD] BUSY idle=%d afterReset=%d -> active=%s%s\n",
-                  idle, after, g_busyHigh ? "HIGH" : "LOW",
-                  (idle == after) ? "  (reset had no effect!)" : "");
+    delay(50);
+    Serial.printf("[EPD] BUSY fixed: HIGH=busy, current read=%d\n", digitalRead(PIN_EPD_BUSY));
 #endif
 }
 
@@ -122,7 +115,7 @@ static void epdSetFullWindow() {
 // ── GPIO initialization ─────────────────────────────────────
 
 void gpioInit() {
-    pinMode(PIN_EPD_BUSY, INPUT);
+    pinMode(PIN_EPD_BUSY, INPUT_PULLUP);
     pinMode(PIN_EPD_RST,  OUTPUT);
     pinMode(PIN_EPD_DC,   OUTPUT);
     pinMode(PIN_EPD_CS,   OUTPUT);
