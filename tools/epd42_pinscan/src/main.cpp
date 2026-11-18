@@ -1,20 +1,24 @@
-// 4.2" 屏 —— SPI 通路矩阵测试
+// 4.2" SSD1683/SSD1619 黑白 —— 硬件 SPI 版
 //
-// 上一轮的关键线索：
-//     pre BUSY=0        → 上电时屏在拉低 BUSY（屏有电、BUSY 线通）
-//     after reset H     → RST 脉冲后屏释放（RST 线也通）
-//     after 0x04 H+500  → power on 之后 BUSY 完全没动（命令没进屏）
+// 前六组（软件 SPI：CS/DC 各种固定、9-bit 3线）全部 base=0 afterPwrOn=0，
+// 说明命令一个都没进屏。软件 SPI 是唯一还没排除的变量：
+// 4.2 的 FPC 比 2.13 长，走线电容大，digitalWrite 翻出来的边沿可能被吃掉。
 //
-// 结论：RST 和 BUSY 两条线是通的，但 SPI 写入没有到达芯片。
-// 可能只有三种：CS 不使能 / DC 反了 / 屏被 BS 脚切到 3 线模式。
+// 这一版换成 ESP32 硬件 SPI（FSPI），并且分三档速率各试一遍：
+//   1) 硬件 SPI 1MHz
+//   2) 硬件 SPI 4MHz
+//   3) 软件 SPI 100kHz（每 bit 加 10us 延时）
 //
-// 这一版把三种可能排列组合成 6 个组合，每个组合都做一遍
-// "复位 → booster → power on"，然后看 BUSY 会不会被拉低。
-// 只要有一种让 BUSY 变低，就说明命令进去了，问题就定位了。
+// 每档只发两条最能验证通路的命令：
+//   0x12  Soft Reset   → SSD1683 会忙几十 ms（BUSY 翻转）
+//   0x04  Power On     → 会忙几百 ms
+// 只要有一档看到 BUSY 动了，就说明线是通的，只是速率/时序问题。
 //
-// 判据：0x04 power on 会让任何 EPD 控制器把 BUSY 拉低几百毫秒。
+// 注意：GPIO13 是这块板的 DC，而它同时是 ESP32-S3 FSPI 的默认 MISO，
+// 所以 SPI.begin 的 MISO 必须显式给 GPIO21，否则 SPI 会把 GPIO13 抢走。
 
 #include <Arduino.h>
+#include <SPI.h>
 
 #define PIN_RST   14
 #define PIN_DC    13
@@ -23,51 +27,46 @@
 #define PIN_MOSI  11
 #define PIN_BUSY  15
 
-static bool g_csFixed = false;   // true = CS 常低，不用 GPIO 控制
-static bool g_dcFixedLow = false; // true = DC 常低（所有字节都当命令）
+static bool g_useHw = true;
+static uint32_t g_hz = 1000000;
 
-// ── 4 线 SPI ───────────────────────────────────────────────
-static void emit(uint8_t b, bool isData) {
-    if (!g_csFixed) {
-        digitalWrite(PIN_CS, LOW);
-    }
-    if (g_dcFixedLow) {
-        digitalWrite(PIN_DC, LOW);
-    } else {
-        digitalWrite(PIN_DC, isData ? HIGH : LOW);
-    }
+static void bitbang(uint8_t b, bool slow) {
     for (int i = 0; i < 8; i++) {
         digitalWrite(PIN_MOSI, (b & 0x80) ? HIGH : LOW);
         b <<= 1;
         digitalWrite(PIN_SCK, HIGH);
+        if (slow) delayMicroseconds(5);
         digitalWrite(PIN_SCK, LOW);
-    }
-    if (!g_csFixed) {
-        digitalWrite(PIN_CS, HIGH);
+        if (slow) delayMicroseconds(5);
     }
 }
 
-// ── 3 线 / 9-bit（第 1 位 = D/C）──────────────────────────
-static void emit3(uint8_t b, bool isData) {
+static void txCmd(uint8_t cmd) {
+    digitalWrite(PIN_DC, LOW);
     digitalWrite(PIN_CS, LOW);
-    digitalWrite(PIN_MOSI, isData ? HIGH : LOW);
-    digitalWrite(PIN_SCK, HIGH);
-    digitalWrite(PIN_SCK, LOW);
-    for (int i = 0; i < 8; i++) {
-        digitalWrite(PIN_MOSI, (b & 0x80) ? HIGH : LOW);
-        b <<= 1;
-        digitalWrite(PIN_SCK, HIGH);
-        digitalWrite(PIN_SCK, LOW);
+    if (g_useHw) {
+        SPI.beginTransaction(SPISettings(g_hz, MSBFIRST, SPI_MODE0));
+        SPI.transfer(cmd);
+        SPI.endTransaction();
+    } else {
+        bitbang(cmd, false);
     }
     digitalWrite(PIN_CS, HIGH);
 }
 
-static void hardReset() {
-    digitalWrite(PIN_RST, LOW);  delay(200);
-    digitalWrite(PIN_RST, HIGH); delay(200);
+static void txData(uint8_t d) {
+    digitalWrite(PIN_DC, HIGH);
+    digitalWrite(PIN_CS, LOW);
+    if (g_useHw) {
+        SPI.beginTransaction(SPISettings(g_hz, MSBFIRST, SPI_MODE0));
+        SPI.transfer(d);
+        SPI.endTransaction();
+    } else {
+        bitbang(d, false);
+    }
+    digitalWrite(PIN_CS, HIGH);
 }
 
-// 观察 BUSY 一段时间，返回「出现低电平」的累计毫秒
 static unsigned long watchLow(unsigned long ms) {
     unsigned long total = 0, t0 = millis();
     while (millis() - t0 < ms) {
@@ -77,51 +76,44 @@ static unsigned long watchLow(unsigned long ms) {
     return total;
 }
 
-static void resetPins() {
+static void hardReset() {
+    digitalWrite(PIN_RST, HIGH); delay(10);
+    digitalWrite(PIN_RST, LOW);  delay(10);
+    digitalWrite(PIN_RST, HIGH); delay(10);
+}
+
+// 一档速率的完整探针
+static void probe(const char *name, bool useHw, uint32_t hz) {
+    g_useHw = useHw;
+    g_hz = hz;
+
     pinMode(PIN_RST,  OUTPUT);
     pinMode(PIN_DC,   OUTPUT);
     pinMode(PIN_CS,   OUTPUT);
     pinMode(PIN_SCK,  OUTPUT);
     pinMode(PIN_MOSI, OUTPUT);
     pinMode(PIN_BUSY, INPUT_PULLUP);
-    digitalWrite(PIN_RST, HIGH);
-    digitalWrite(PIN_CS, g_csFixed ? LOW : HIGH);
+    digitalWrite(PIN_CS, HIGH);
     digitalWrite(PIN_DC, LOW);
     digitalWrite(PIN_SCK, LOW);
-    digitalWrite(PIN_MOSI, LOW);
-}
 
-// 一个组合：复位 → 0x06 17 17 17 → 0x04，返回低电平累计
-static unsigned long probe4(const char *name, bool csFixed, bool dcLow) {
-    g_csFixed = csFixed;
-    g_dcFixedLow = dcLow;
-    resetPins();
+    if (useHw) {
+        SPI.end();
+        SPI.begin(PIN_SCK, 21, PIN_MOSI, PIN_CS);   // MISO 用 21，避开 GPIO13=DC
+    }
+
     hardReset();
-    unsigned long base = watchLow(200);      // 复位后的基线
+    unsigned long base = watchLow(300);
 
-    emit(0x06, false); emit(0x17, true); emit(0x17, true); emit(0x17, true);
-    emit(0x04, false);                        // POWER ON
-    unsigned long busy = watchLow(3000);
+    txCmd(0x12);                       // Soft Reset
+    unsigned long afterResetCmd = watchLow(1500);
 
-    Serial.printf("  %-34s base=%lums  afterPwrOn=%lums  %s\n",
-                  name, base, busy,
-                  (busy > base + 50) ? "<<< BUSY 动了！" : "");
-    return busy;
-}
+    txCmd(0x04);                       // Power On
+    unsigned long afterPowerOn = watchLow(3000);
 
-static unsigned long probe3(const char *name) {
-    resetPins();
-    hardReset();
-    unsigned long base = watchLow(200);
-
-    emit3(0x06, false); emit3(0x17, true); emit3(0x17, true); emit3(0x17, true);
-    emit3(0x04, false);
-    unsigned long busy = watchLow(3000);
-
-    Serial.printf("  %-34s base=%lums  afterPwrOn=%lums  %s\n",
-                  name, base, busy,
-                  (busy > base + 50) ? "<<< BUSY 动了！" : "");
-    return busy;
+    Serial.printf("  %-22s base=%lums  0x12=%lums  0x04=%lums  %s\n",
+                  name, base, afterResetCmd, afterPowerOn,
+                  (afterResetCmd + afterPowerOn > 50) ? "<<< BUSY 动了！" : "");
 }
 
 void setup() {
@@ -130,28 +122,19 @@ void setup() {
 
     Serial.println();
     Serial.println("==========================================================");
-    Serial.println(" 4.2\" SPI path matrix  (0x04 power-on must pull BUSY low)");
-    Serial.println(" SCK=12 MOSI=11 CS=10 DC=13 RST=14 BUSY=15");
+    Serial.println(" 4.2\" SSD1683 BW  --  hardware SPI vs bit-bang");
     Serial.println("==========================================================");
-    Serial.printf("pre BUSY=%d (0=busy)\n\n", digitalRead(PIN_BUSY));
+    Serial.printf("pre BUSY=%d\n\n", digitalRead(PIN_BUSY));
 
-    Serial.println("[A] 4-wire combinations");
-    probe4("A1 CS=gpio  DC=gpio   (normal)",     false, false);
-    probe4("A2 CS=fixed DC=gpio",                true,  false);
-    probe4("A3 CS=gpio  DC=fixed-low",           false, true);
-    probe4("A4 CS=fixed DC=fixed-low",           true,  true);
-
-    Serial.println("\n[B] 3-wire (9-bit) mode");
-    probe3("B1 9-bit  DC in first bit");
+    probe("HW SPI 1MHz",  true,  1000000);
+    probe("HW SPI 4MHz",  true,  4000000);
+    probe("HW SPI 100kHz", true, 100000);
+    probe("bit-bang 100kHz", false, 0);
 
     Serial.println("\n==========================================================");
-    Serial.println(" 判读：");
-    Serial.println("  任一组合出现 <<< BUSY 动了  -> 命令通了，按那组配置继续");
-    Serial.println("  全部 base 接近 afterPwrOn   -> 屏侧没收到 SPI，或板子缺升压电路");
+    Serial.println(" 任一行 0x12 / 0x04 有低电平 -> SPI 通了，只是速度/时序问题");
+    Serial.println(" 四行全 0                     -> 信号线真的没通到屏");
     Serial.println("==========================================================");
-
-    resetPins();
-    hardReset();
 }
 
 void loop() {
