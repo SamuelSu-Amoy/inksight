@@ -229,11 +229,14 @@ void epdInit() {
     epdSendCommand(0x04);
     epdWaitBusy();
 #else
+    unsigned long tInit = millis();
+    Serial.printf("[EPD] SSD1683 init, %dx%d, BUSY pin read=%d\n", W, H, digitalRead(PIN_EPD_BUSY));
+
     epdReset();
-    epdWaitBusy();
+    epdWaitBusy(3000);     // 复位：3 秒等不到就继续，别把开机拖死
 
     epdSendCommand(0x12);  // Software Reset
-    epdWaitBusy();
+    epdWaitBusy(3000);
 
     epdSendCommand(0x21);  // Display Update Control 1
     epdSendData(0x40);     //   Source output mode
@@ -243,7 +246,9 @@ void epdInit() {
     epdSendData(0x05);
 
     epdSetFullWindow();
-    epdWaitBusy();
+    epdWaitBusy(3000);
+
+    Serial.printf("[EPD] SSD1683 init done %lu ms\n", millis() - tInit);
 #endif
 }
 
@@ -462,7 +467,9 @@ void epdDisplay(const uint8_t *image) {
     epdSendCommand(0x22);  // Display Update Control 2
     epdSendData(0xF7);     //   Full update sequence
     epdSendCommand(0x20);  // Activate Display Update Sequence
-    epdWaitBusy();
+    unsigned long tRef = millis();
+    epdWaitBusy(30000);    // 4.2 全刷 15~20 秒，给足时间
+    Serial.printf("[EPD] refresh %lu ms\n", millis() - tRef);
 #endif
 }
 
@@ -487,7 +494,7 @@ void epdDisplayDeepClear(const uint8_t *image) {
     int w = ROW_BYTES;
     int total = w * H;
 
-    for (int pass = 0; pass < 4; pass++) {
+    for (int pass = 0; pass < 2; pass++) {   // 4.2 全刷很慢，两轮黑白足够
         uint8_t fill = (pass % 2 == 0) ? 0x00 : 0xFF;
 
         epdSendCommand(0x24);
@@ -501,7 +508,7 @@ void epdDisplayDeepClear(const uint8_t *image) {
         epdSendCommand(0x22);
         epdSendData(0xF7);
         epdSendCommand(0x20);
-        epdWaitBusy();
+        epdWaitBusy(25000);
     }
 
     epdSendCommand(0x24);
@@ -517,7 +524,7 @@ void epdDisplayDeepClear(const uint8_t *image) {
     epdSendCommand(0x22);
     epdSendData(0xF7);
     epdSendCommand(0x20);
-    epdWaitBusy();
+    epdWaitBusy(25000);
 #endif
 }
 
