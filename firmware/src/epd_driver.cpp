@@ -29,6 +29,30 @@ static void epdSendData(uint8_t data) {
     digitalWrite(PIN_EPD_CS, HIGH);
 }
 
+// ── BUSY 极性（iDevice 板上自动判定）────────────────────────
+// 2.13 那块 UC8151D 是「低 = 忙」，4.2 的 HINK 未必相同。
+// 思路：复位前后的电平一定会翻转，翻成高就是高忙，翻成低就是低忙。
+static bool g_busyHigh = true;
+
+static void epdDetectBusyPolarity() {
+#if defined(BOARD_PROFILE_IDEVICE_S3)
+    pinMode(PIN_EPD_BUSY, INPUT_PULLUP);
+    delay(100);
+    int idle = digitalRead(PIN_EPD_BUSY);
+
+    digitalWrite(PIN_EPD_RST, LOW);  delay(20);
+    digitalWrite(PIN_EPD_RST, HIGH); delay(120);
+    int after = digitalRead(PIN_EPD_BUSY);
+
+    if (idle != after) {
+        g_busyHigh = (after == HIGH);
+    }
+    Serial.printf("[EPD] BUSY idle=%d afterReset=%d -> active=%s%s\n",
+                  idle, after, g_busyHigh ? "HIGH" : "LOW",
+                  (idle == after) ? "  (reset had no effect!)" : "");
+#endif
+}
+
 static void epdWaitBusy(unsigned long maxMs = 0) {
     unsigned long t0 = millis();
     unsigned long timeoutMs = maxMs > 0 ? maxMs :
@@ -37,14 +61,17 @@ static void epdWaitBusy(unsigned long maxMs = 0) {
 #else
         10000;
 #endif
-#if defined(EPD_PANEL_42_DKE_RY683) || defined(EPD_PANEL_42_GDEM042F52)
+#if defined(BOARD_PROFILE_IDEVICE_S3)
+    while ((digitalRead(PIN_EPD_BUSY) == HIGH) == g_busyHigh) {
+#elif defined(EPD_PANEL_42_DKE_RY683) || defined(EPD_PANEL_42_GDEM042F52)
     while (digitalRead(PIN_EPD_BUSY) == LOW) {
 #else
     while (digitalRead(PIN_EPD_BUSY) == HIGH) {
 #endif
         delay(10);
         if (millis() - t0 > timeoutMs) {
-            Serial.println("EPD busy TIMEOUT!");
+            Serial.printf("EPD busy TIMEOUT (%lu ms, BUSY=%d)\n",
+                          (unsigned long)(millis() - t0), digitalRead(PIN_EPD_BUSY));
             return;
         }
     }
@@ -110,6 +137,10 @@ void gpioInit() {
 // ── EPD full init (standard mode) ──
 
 void epdInit() {
+#if !defined(EPD_PANEL_42_DKE_RY683) && !defined(EPD_PANEL_42_GDEM042F52)
+    static bool s_detected = false;
+    if (!s_detected) { epdDetectBusyPolarity(); s_detected = true; }
+#endif
 #if defined(EPD_PANEL_42_DKE_RY683)
     Serial.printf("[EPD-init] begin BUSY=%d\n", digitalRead(PIN_EPD_BUSY));
     epdReset();
