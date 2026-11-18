@@ -942,11 +942,18 @@ void epdInitFast() { epdInit(); }
 void epdDisplay(const uint8_t *image) {
     epdInit();
 
+    // 先清红色平面：这块是 BWR 屏，只写 0x10 的话红色 RAM 里留着上电随机值，
+    // 叠加到黑白画面上就是一片花。原厂驱动两个平面都写，我们照做。
+    memset(g_rot_buf, 0xFF, sizeof(g_rot_buf));
+    ucCmd(0x4E); ucData(0x00);
+    ucCmd(0x4F); ucData(0x00); ucData(0x00);
+    ucCmd(0x13); ucDataBuf(g_rot_buf, sizeof(g_rot_buf));   // 红色平面：0xFF = 不出红（原厂是取反后写入）
+
     rotateLandscapeToPanel(image);
 
     ucCmd(0x4E); ucData(0x00);
     ucCmd(0x4F); ucData(0x00); ucData(0x00);
-    ucCmd(0x10); ucDataBuf(g_rot_buf, sizeof(g_rot_buf));   // 旋转后的整屏
+    ucCmd(0x10); ucDataBuf(g_rot_buf, sizeof(g_rot_buf));   // 黑白平面
     ucCmd(0x12);                                            // display refresh
     delay(10);
     ucWaitBusy("refresh", 30000);
