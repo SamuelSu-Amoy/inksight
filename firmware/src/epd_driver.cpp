@@ -103,7 +103,7 @@ static void epdSetFullWindow() {
 
     epdSendCommand(0x44);  // Set RAM X address range
     epdSendData(0x00);
-    epdSendData((W - 1) / 8);
+    epdSendData((uint8_t)(ROW_BYTES - 1));
 
     epdSendCommand(0x45);  // Set RAM Y address range
     epdSendData(0x00);
@@ -443,7 +443,7 @@ static void epdSend2bppAndRefresh(const uint8_t *buf2bpp) {
 void epdDisplay(const uint8_t *image) {
 #if defined(EPD_PANEL_42_DKE_RY683) || defined(EPD_PANEL_42_GDEM042F52)
     if (!ensureColorBuf()) { Serial.println("[EPD] colorBuf alloc failed"); return; }
-    int rowBytes = W / 8;
+    int rowBytes = ROW_BYTES;
     int out = 0;
     for (int y = 0; y < H; y++) {
         for (int x = 0; x < W; x += 4) {
@@ -454,7 +454,7 @@ void epdDisplay(const uint8_t *image) {
 #else
     epdInit();
 
-    int w = W / 8;
+    int w = ROW_BYTES;
 
     epdSendCommand(0x24);  // Write Black/White RAM
     for (int j = 0; j < H; j++)
@@ -491,7 +491,7 @@ void epdDisplayDeepClear(const uint8_t *image) {
     epdDisplay(image);
 #else
     epdInit();
-    int w = W / 8;
+    int w = ROW_BYTES;
     int total = w * H;
 
     for (int pass = 0; pass < 4; pass++) {
@@ -533,7 +533,7 @@ void epdDisplayDeepClear(const uint8_t *image) {
 void epdDisplayFast(const uint8_t *image) {
 #if defined(EPD_PANEL_42_GDEM042F52)
     if (!ensureColorBuf()) { Serial.println("[EPD] colorBuf alloc failed"); return; }
-    int rowBytes = W / 8;
+    int rowBytes = ROW_BYTES;
     int out = 0;
     for (int y = 0; y < H; y++) {
         for (int x = 0; x < W; x += 4) {
@@ -551,7 +551,7 @@ void epdDisplayFast(const uint8_t *image) {
 #else
     epdInitFast();
 
-    int w = W / 8;
+    int w = ROW_BYTES;
 
     epdSendCommand(0x24);  // Write Black/White RAM
     for (int j = 0; j < H; j++)
