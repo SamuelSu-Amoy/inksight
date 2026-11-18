@@ -1,13 +1,17 @@
-// 4.2" HINK-E042A13-A0（SSD1619A） BUSY 波形追踪
+// 4.2" 屏 —— 按原厂固件 EPD420R（UC8176 三色）序列驱动
 //
-// 上一版扫描的结论：GPIO15 在 idle 时被屏拉低（0），RST 驱动后变高（1）。
-// 说明屏是通电的、BUSY 这根线是通的。但发完初始化命令 BUSY 没有任何动作。
+// 依据：gitee.com/jetmie/evernote  open/idisplay/ble/epd.py
+//     class EPD420R(EPD3):
+//         EPD_WIDTH = 400 ; EPD_HEIGHT = 300 ; BUSY = 0   (低=忙)
+//         init(): reset -> 0x06 17 17 17 -> 0x04 -> wait -> 0x00 0F
+//         display(): 0x10(黑) -> 0x13(红) -> 0x12 -> wait
+//     utils.devices = {132:EPD213, 133:EPD213R, 134:EPD266R, 135:EPD290, 136:EPD420R}
 //
-// 这一版只干一件事：把 BUSY 的完整波形打出来（游程编码，只在跳变时输出）。
-// 看波形就能区分：
-//   · RST 释放后 有 L→H→L 的脉冲  → 屏在正常初始化，只是参数不对
-//   · 全程一条直线                → 命令根本没被屏接收（SPI 线序 / BS 模式不对）
-//   · 一直停在 H 不回来            → 屏在等升压，但这块板没有 4.2 需要的升压电路
+// 之前一直用 SSD1683 的指令集（0x12 软复位 / 0x11 / 0x44 / 0x45 / 0x24 / 0x22 / 0x20），
+// 那是完全另一套控制器。UC8176 里 0x12 是 DISPLAY_REFRESH，
+// 所以我们发的"软复位"对这块屏来说只是"刷新一屏空数据"，当然什么都不会发生。
+//
+// 这版按原厂序列走一遍，每步打印 BUSY 波形。
 //
 // 刷机：merged.bin 烧 0x0（DIO）
 
@@ -20,8 +24,20 @@
 #define PIN_MOSI  11
 #define PIN_BUSY  15
 
-// ── 软件 SPI（4 线）────────────────────────────────────────
-static void spiByte(uint8_t b) {
+#define FB_LEN 15000      // 400*300/8
+
+// UC8176 指令
+#define CMD_PANEL_SETTING   0x00
+#define CMD_POWER_OFF       0x02
+#define CMD_POWER_ON        0x04
+#define CMD_BOOSTER         0x06
+#define CMD_DATA_1          0x10
+#define CMD_DISPLAY_REFRESH 0x12
+#define CMD_DATA_2          0x13
+#define CMD_VCOM_INTERVAL   0x50
+#define CMD_RESOLUTION      0x61
+
+static void spiB(uint8_t b) {
     for (int i = 0; i < 8; i++) {
         digitalWrite(PIN_MOSI, (b & 0x80) ? HIGH : LOW);
         b <<= 1;
@@ -29,87 +45,64 @@ static void spiByte(uint8_t b) {
         digitalWrite(PIN_SCK, LOW);
     }
 }
-static void cmd4(uint8_t c) {
+static void c(uint8_t cmd) {
     digitalWrite(PIN_DC, LOW);
     digitalWrite(PIN_CS, LOW);
-    spiByte(c);
+    spiB(cmd);
     digitalWrite(PIN_CS, HIGH);
 }
-static void dat4(uint8_t d) {
+static void d1(uint8_t v) {
     digitalWrite(PIN_DC, HIGH);
     digitalWrite(PIN_CS, LOW);
-    spiByte(d);
+    spiB(v);
     digitalWrite(PIN_CS, HIGH);
 }
 
-// ── 软件 SPI（3 线 / 9-bit：第 9 位 = D/C）─────────────────
-static void spi3(uint8_t b, bool isData) {
-    digitalWrite(PIN_CS, LOW);
-    // 第 1 位是 D/C
-    digitalWrite(PIN_MOSI, isData ? HIGH : LOW);
-    digitalWrite(PIN_SCK, HIGH);
-    digitalWrite(PIN_SCK, LOW);
-    for (int i = 0; i < 8; i++) {
-        digitalWrite(PIN_MOSI, (b & 0x80) ? HIGH : LOW);
-        b <<= 1;
-        digitalWrite(PIN_SCK, HIGH);
-        digitalWrite(PIN_SCK, LOW);
+// 低 = 忙（EPD3.BUSY = 0）
+static bool waitIdle(const char *tag, unsigned long timeoutMs) {
+    unsigned long t0 = millis();
+    while (digitalRead(PIN_BUSY) == LOW) {
+        if (millis() - t0 > timeoutMs) {
+            Serial.printf("  [%s] TIMEOUT %lu ms, BUSY=%d\n", tag,
+                          (unsigned long)(millis() - t0), digitalRead(PIN_BUSY));
+            return false;
+        }
+        delay(5);
     }
-    digitalWrite(PIN_CS, HIGH);
+    Serial.printf("  [%s] idle ok %lu ms\n", tag, (unsigned long)(millis() - t0));
+    return true;
 }
 
-// ── BUSY 波形追踪（游程编码）───────────────────────────────
+// BUSY 波形（游程编码）
 static void trace(const char *tag, unsigned long ms) {
-    Serial.printf("  TRACE %-22s [", tag);
+    Serial.printf("  TRACE %-18s [", tag);
     unsigned long t0 = millis();
     int last = digitalRead(PIN_BUSY);
-    unsigned long tSeg = t0;
+    unsigned long seg = t0;
     while (millis() - t0 < ms) {
         int v = digitalRead(PIN_BUSY);
         if (v != last) {
-            Serial.printf("%c+%lu ", last ? 'H' : 'L', millis() - tSeg);
-            tSeg = millis();
+            Serial.printf("%c+%lu ", last ? 'H' : 'L', millis() - seg);
+            seg = millis();
             last = v;
         }
         delay(1);
     }
-    Serial.printf("%c+%lu]\n", last ? 'H' : 'L', millis() - tSeg);
+    Serial.printf("%c+%lu]\n", last ? 'H' : 'L', millis() - seg);
 }
 
-static void pinsOutput() {
-    pinMode(PIN_RST,  OUTPUT);
-    pinMode(PIN_DC,   OUTPUT);
-    pinMode(PIN_CS,   OUTPUT);
-    pinMode(PIN_SCK,  OUTPUT);
-    pinMode(PIN_MOSI, OUTPUT);
-    digitalWrite(PIN_CS, HIGH);
-    digitalWrite(PIN_SCK, LOW);
-    digitalWrite(PIN_MOSI, LOW);
-    digitalWrite(PIN_DC, LOW);
-    pinMode(PIN_BUSY, INPUT_PULLUP);
+static void hardReset() {
+    // 原厂 EPD.reset(): rst=0 -> 200ms -> rst=1 -> 200ms
+    digitalWrite(PIN_RST, LOW);  delay(200);
+    digitalWrite(PIN_RST, HIGH); delay(200);
 }
 
-// SSD1683 / SSD1619 全套初始化（4 线）
-static void ssdFull4() {
-    cmd4(0x12);                     // soft reset
-    trace("after 0x12", 200);
-    cmd4(0x21); dat4(0x40); dat4(0x00);
-    cmd4(0x3C); dat4(0x05);
-    cmd4(0x11); dat4(0x03);
-    cmd4(0x44); dat4(0x00); dat4(0x31);
-    cmd4(0x45); dat4(0x00); dat4(0x00); dat4(0x2B); dat4(0x01);
-    cmd4(0x4E); dat4(0x00);
-    cmd4(0x4F); dat4(0x00); dat4(0x00);
-}
-
-static void fill4(uint8_t v) {
-    cmd4(0x24);
+static void writePlane(uint8_t cmd, uint8_t value) {
+    c(cmd);
     digitalWrite(PIN_DC, HIGH);
     digitalWrite(PIN_CS, LOW);
-    for (int i = 0; i < 15000; i++) spiByte(v);
+    for (int i = 0; i < FB_LEN; i++) spiB(value);
     digitalWrite(PIN_CS, HIGH);
-    cmd4(0x22); dat4(0xF7);
-    cmd4(0x20);
 }
 
 void setup() {
@@ -118,59 +111,75 @@ void setup() {
 
     Serial.println();
     Serial.println("=================================================");
-    Serial.println(" SSD1619 BUSY waveform tracer  (iDevice S3 4.2\")");
+    Serial.println(" 4.2\" UC8176 (yuan chang EPD420R) sequence");
+    Serial.println(" SCK=12 MOSI=11 CS=10 DC=13 RST=14 BUSY=15");
     Serial.println("=================================================");
-    Serial.printf("pre: BUSY=%d\n", digitalRead(PIN_BUSY));
 
-    pinsOutput();
+    pinMode(PIN_RST,  OUTPUT);
+    pinMode(PIN_DC,   OUTPUT);
+    pinMode(PIN_CS,   OUTPUT);
+    pinMode(PIN_SCK,  OUTPUT);
+    pinMode(PIN_MOSI, OUTPUT);
+    pinMode(PIN_BUSY, INPUT_PULLUP);
+    digitalWrite(PIN_CS, HIGH);
+    digitalWrite(PIN_DC, LOW);
+    digitalWrite(PIN_SCK, LOW);
 
-    // ── ① 硬复位波形 ───────────────────────────────────────
-    Serial.println("\n[1] hard reset waveform");
-    digitalWrite(PIN_RST, HIGH); trace("RST=H before", 60);
-    digitalWrite(PIN_RST, LOW);  trace("RST=L 20ms", 20 * 1);
-    digitalWrite(PIN_RST, HIGH); trace("RST=H release", 400);
+    Serial.printf("pre BUSY=%d (0=busy)\n", digitalRead(PIN_BUSY));
 
-    // ── ② 4 线软复位 ───────────────────────────────────────
-    Serial.println("\n[2] 4-wire: 0x12 soft reset");
-    cmd4(0x12);
-    trace("4w after 0x12", 400);
+    // 1 硬复位
+    Serial.println("\n[1] reset (RST L 200ms -> H 200ms)");
+    hardReset();
+    trace("after reset", 500);
 
-    // ── ③ 4 线 power on ───────────────────────────────────
-    Serial.println("\n[3] 4-wire: full init + 0x04 power on");
-    ssdFull4();
-    cmd4(0x04);
-    trace("4w after 0x04", 4000);
+    // 2 原厂 init
+    Serial.println("\n[2] 0x06 booster 17 17 17");
+    c(CMD_BOOSTER); d1(0x17); d1(0x17); d1(0x17);
+    trace("after 0x06", 200);
 
-    // ── ④ 4 线刷全黑 ──────────────────────────────────────
-    Serial.println("\n[4] 4-wire: fill BLACK (0x24=00, 0x22=F7, 0x20)");
-    fill4(0x00);
-    trace("4w fill BLACK", 20000);
+    Serial.println("[3] 0x04 power on");
+    c(CMD_POWER_ON);
+    waitIdle("power on", 15000);
+    trace("after 0x04", 500);
 
-    // ── ⑤ 4 线刷全白 ──────────────────────────────────────
-    Serial.println("\n[5] 4-wire: fill WHITE (0x24=FF)");
-    fill4(0xFF);
-    trace("4w fill WHITE", 20000);
+    Serial.println("[4] 0x00 panel setting 0x0F");
+    c(CMD_PANEL_SETTING); d1(0x0F);
+    delay(50);
 
-    // ── ⑥ 3 线（9-bit）再试一遍 ───────────────────────────
-    Serial.println("\n[6] 3-wire 9-bit mode (in case BS pin selects 3-wire)");
-    digitalWrite(PIN_RST, LOW);  delay(20);
-    digitalWrite(PIN_RST, HIGH); delay(20);
-    spi3(0x12, false);
-    trace("3w after 0x12", 400);
+    Serial.println("[5] 0x61 400x300 + 0x50 0x37");
+    c(CMD_RESOLUTION); d1(0x01); d1(0x90); d1(0x01); d1(0x2C);
+    c(CMD_VCOM_INTERVAL); d1(0x37);
 
-    Serial.println("\n=================================================");
-    Serial.println(" 判读：");
-    Serial.println("  RST 释放后出现 L+xx / H+xx 跳变  -> 屏活着");
-    Serial.println("  0x12 / 0x04 后有跳变           -> 命令收到了，是参数问题");
-    Serial.println("  某一步之后一直是 H 不回来       -> 卡在升压（硬件缺电路）");
-    Serial.println("  全程一条直线                    -> SPI 线序不对");
-    Serial.println("=================================================");
+    // 6 刷全黑
+    Serial.println("\n[6] push BLACK: 0x10=00, 0x13=00, refresh");
+    unsigned long t = millis();
+    writePlane(CMD_DATA_1, 0x00);
+    writePlane(CMD_DATA_2, 0x00);
+    Serial.printf("  data done %lu ms\n", millis() - t);
+    c(CMD_DISPLAY_REFRESH);
+    delay(10);
+    waitIdle("refresh black", 40000);
+    trace("after refresh", 1000);
+
+    // 7 刷全白
+    Serial.println("\n[7] push WHITE: 0x10=FF, 0x13=00, refresh");
+    writePlane(CMD_DATA_1, 0xFF);
+    writePlane(CMD_DATA_2, 0x00);
+    c(CMD_DISPLAY_REFRESH);
+    delay(10);
+    waitIdle("refresh white", 40000);
+    trace("after refresh", 1000);
+
+    // 8 断电对照
+    Serial.println("\n[8] power off cycle");
+    c(CMD_POWER_OFF);
+    waitIdle("power off", 10000);
+    trace("after 0x02", 1000);
+
+    Serial.println("\n--- done ---");
 }
 
 void loop() {
-    // 每 8 秒一次慢速 RST 脉冲，方便对照屏幕画面
-    digitalWrite(PIN_RST, LOW);  delay(50);
-    digitalWrite(PIN_RST, HIGH); delay(50);
     Serial.printf("[idle] t=%lus BUSY=%d\n", (unsigned long)(millis() / 1000), digitalRead(PIN_BUSY));
-    delay(8000);
+    delay(10000);
 }
