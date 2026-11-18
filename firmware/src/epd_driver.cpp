@@ -871,6 +871,29 @@ static bool ucWaitBusy(const char *tag, uint32_t timeoutMs = 30000) {
     return true;
 }
 
+// ── 横屏布局 → 竖屏面板 的 90° 旋转 ────────────────────────
+// 布局按 EPD_WIDTH × EPD_HEIGHT（250 × 122，横向），
+// 面板本身是 122 宽 × 250 高，所以这里做一次像素搬运。
+// 方向按 2.9" 那块屏的既有实现（rotate_landscape_to_panel）。
+#define PANEL_ROW_BYTES  16                 // 122 px / 8，向上取整
+#define PANEL_BUF_LEN    (PANEL_ROW_BYTES * EPD_HEIGHT * 2)   // 16 * 250
+
+static uint8_t g_rot_buf[PANEL_ROW_BYTES * 250];
+
+static void rotateLandscapeToPanel(const uint8_t *src) {
+    const int srcRow = (EPD_WIDTH + 7) / 8;          // 250 -> 32
+    memset(g_rot_buf, 0xFF, sizeof(g_rot_buf));      // 先涂白
+
+    for (int sy = 0; sy < EPD_HEIGHT; sy++) {        // 122 行
+        for (int sx = 0; sx < EPD_WIDTH; sx++) {     // 250 列
+            if (src[sy * srcRow + (sx >> 3)] & (0x80 >> (sx & 7))) continue;  // 白
+            int dx = sy;                             // 0..121
+            int dy = EPD_WIDTH - 1 - sx;             // 249..0
+            g_rot_buf[dy * PANEL_ROW_BYTES + (dx >> 3)] &= ~(0x80 >> (dx & 7));
+        }
+    }
+}
+
 static bool g_uc_ready = false;
 
 void gpioInit() {
@@ -911,7 +934,7 @@ void epdInit() {
     ucWaitBusy("power on", 15000);
 
     g_uc_ready = true;
-    Serial.printf("[EPD] UC8151D ready, %dx%d, buf %d\n", EPD_WIDTH, EPD_HEIGHT, IMG_BUF_LEN);
+    Serial.printf("[EPD] UC8151D ready, layout %dx%d, panel 122x250, src buf %d, out buf %d\n", EPD_WIDTH, EPD_HEIGHT, IMG_BUF_LEN, (int)sizeof(g_rot_buf));
 }
 
 void epdInitFast() { epdInit(); }
@@ -919,10 +942,12 @@ void epdInitFast() { epdInit(); }
 void epdDisplay(const uint8_t *image) {
     epdInit();
 
+    rotateLandscapeToPanel(image);
+
     ucCmd(0x4E); ucData(0x00);
     ucCmd(0x4F); ucData(0x00); ucData(0x00);
-    ucCmd(0x10); ucDataBuf(image, IMG_BUF_LEN);       // 黑白平面
-    ucCmd(0x12);                                      // display refresh
+    ucCmd(0x10); ucDataBuf(g_rot_buf, sizeof(g_rot_buf));   // 旋转后的整屏
+    ucCmd(0x12);                                            // display refresh
     delay(10);
     ucWaitBusy("refresh", 30000);
 }
@@ -937,7 +962,10 @@ void epdDisplayDeepClear(const uint8_t *image) {
             memset(buf, (pass % 2 == 0) ? 0x00 : 0xFF, IMG_BUF_LEN);
             ucCmd(0x4E); ucData(0x00);
             ucCmd(0x4F); ucData(0x00); ucData(0x00);
-            ucCmd(0x10); ucDataBuf(buf, IMG_BUF_LEN);
+            memset(g_rot_buf, (pass % 2 == 0) ? 0x00 : 0xFF, sizeof(g_rot_buf));
+            ucCmd(0x4E); ucData(0x00);
+            ucCmd(0x4F); ucData(0x00); ucData(0x00);
+            ucCmd(0x10); ucDataBuf(g_rot_buf, sizeof(g_rot_buf));
             ucCmd(0x12); delay(10);
             ucWaitBusy("deep clear", 30000);
         }
