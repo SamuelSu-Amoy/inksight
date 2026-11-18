@@ -868,20 +868,24 @@ static bool ucWaitBusy(const char *tag, uint32_t timeoutMs = 30000) {
 // 布局按 EPD_WIDTH × EPD_HEIGHT（250 × 122，横向），
 // 面板本身是 122 宽 × 250 高，所以这里做一次像素搬运。
 // 方向按 2.9" 那块屏的既有实现（rotate_landscape_to_panel）。
-#define PANEL_ROW_BYTES  16                 // 122 px / 8，向上取整
-#define PANEL_BUF_LEN    (PANEL_ROW_BYTES * EPD_HEIGHT * 2)   // 16 * 250
+// 面板 RAM 是 128x250，但玻璃真正能显示的区域只有 104x212，
+// 而且是从 RAM 的 (0,0) 左上角对齐开始（原厂 epd.py 的 length = 2756 = 13*212 就是这个窗口）。
+// 所以这里直接以「104 x 212」为目标：写 13 字节 x 212 行，一字节都不浪费。
+#define PANEL_ROW_BYTES  13                 // 104 px / 8 = 13
+#define PANEL_ROWS       212
+#define PANEL_BUF_LEN    (PANEL_ROW_BYTES * PANEL_ROWS)   // 2756，与原厂 length 一致
 
-static uint8_t g_rot_buf[PANEL_ROW_BYTES * 250];
+static uint8_t g_rot_buf[PANEL_BUF_LEN];
 
 static void rotateLandscapeToPanel(const uint8_t *src) {
-    const int srcRow = (EPD_WIDTH + 7) / 8;          // 250 -> 32
+    const int srcRow = (EPD_WIDTH + 7) / 8;          // 212 -> 27
     memset(g_rot_buf, 0xFF, sizeof(g_rot_buf));      // 先涂白
 
-    for (int sy = 0; sy < EPD_HEIGHT; sy++) {        // 122 行
-        for (int sx = 0; sx < EPD_WIDTH; sx++) {     // 250 列
+    for (int sy = 0; sy < EPD_HEIGHT; sy++) {        // 104 行
+        for (int sx = 0; sx < EPD_WIDTH; sx++) {     // 212 列
             if (src[sy * srcRow + (sx >> 3)] & (0x80 >> (sx & 7))) continue;  // 白
-            int dx = sy;                             // 0..121
-            int dy = EPD_WIDTH - 1 - sx;             // 249..0
+            int dx = sy;                             // 0..103
+            int dy = EPD_WIDTH - 1 - sx;             // 211..0
             g_rot_buf[dy * PANEL_ROW_BYTES + (dx >> 3)] &= ~(0x80 >> (dx & 7));
         }
     }
@@ -913,13 +917,9 @@ void epdInit() {
     ucWaitBusy("reset", 5000);
 
     ucCmd(0x00); ucData(0x0F);                        // panel setting: LUT from OTP, BWR
-    ucCmd(0x44); ucData(0x00); ucData(0x0F);          // RAM X 0..15
-    {
-        uint16_t yend = EPD_HEIGHT - 1;
-        ucCmd(0x45);
-        ucData(0x00); ucData(0x00);
-        ucData(yend & 0xFF); ucData((yend >> 8) & 0x01);
-    }
+    ucCmd(0x44); ucData(0x00); ucData(PANEL_ROW_BYTES - 1);   // RAM X 0..12  = 104 px
+    ucCmd(0x45); ucData(0x00); ucData(0x00);                  // RAM Y 0..211 = 212 行
+    ucData((PANEL_ROWS - 1) & 0xFF); ucData(((PANEL_ROWS - 1) >> 8) & 0x01);
     ucCmd(0x4E); ucData(0x00);
     ucCmd(0x4F); ucData(0x00); ucData(0x00);
     ucCmd(0x50); ucData(0x11); ucData(0x07);          // VCOM & data interval
