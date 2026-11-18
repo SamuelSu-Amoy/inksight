@@ -110,7 +110,7 @@ const uint8_t* getGlyph(char c) {
 // ── Draw scaled text into imgBuf ────────────────────────────
 
 void drawText(const char *msg, int x, int y, int scale) {
-    int rowBytes = W / 8;
+    int rowBytes = ROW_BYTES;   // FIX: W=250 not multiple of 8
     int len = strlen(msg);
 
     for (int ci = 0; ci < len; ci++) {
@@ -140,7 +140,7 @@ static int textWidth(int charCount, int scale) {
 }
 
 static void fillRect(int x, int y, int w, int h) {
-    int rowBytes = W / 8;
+    int rowBytes = ROW_BYTES;   // FIX: W=250 not multiple of 8
     for (int py = y; py < y + h; py++) {
         if (py < 0 || py >= H) continue;
         for (int px = x; px < x + w; px++) {
@@ -657,7 +657,7 @@ void updateVocabRatingRegion(const uint8_t *oldImage) {
         return;
     }
 
-    const int rowBytes = W / 8;
+    const int rowBytes = ROW_BYTES;   // FIX: W=250 not multiple of 8
     const int regionH = yEnd - yStart;
     const int partLen = rowBytes * regionH;
     uint8_t *partBuf = (uint8_t *)malloc(partLen);
