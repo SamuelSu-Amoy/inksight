@@ -459,10 +459,12 @@ void epdDisplay(const uint8_t *image) {
         for (int i = 0; i < w; i++)
             epdSendData(image[i + j * w]);
 
-    epdSendCommand(0x26);  // Write RED RAM (old data for refresh)
-    for (int j = 0; j < H; j++)
-        for (int i = 0; i < w; i++)
-            epdSendData(image[i + j * w]);
+    // HINK-E042A13-A0 是 BWR 三色屏：0x26 的 bit=1 表示红。
+    // InkSight 只有 1bit 黑白缓冲，所以红色平面整片写 0x00（不出红）。
+    // 黑白屏忽略这个平面，写 0x00 也无害。
+    epdSendCommand(0x26);
+    for (int i = 0; i < w * H; i++)
+        epdSendData(0x00);
 
     epdSendCommand(0x22);  // Display Update Control 2
     epdSendData(0xF7);     //   Full update sequence
@@ -503,7 +505,7 @@ void epdDisplayDeepClear(const uint8_t *image) {
 
         epdSendCommand(0x26);
         for (int i = 0; i < total; i++)
-            epdSendData(fill);
+            epdSendData(0x00);
 
         epdSendCommand(0x22);
         epdSendData(0xF7);
@@ -517,9 +519,8 @@ void epdDisplayDeepClear(const uint8_t *image) {
             epdSendData(image[i + j * w]);
 
     epdSendCommand(0x26);
-    for (int j = 0; j < H; j++)
-        for (int i = 0; i < w; i++)
-            epdSendData(image[i + j * w]);
+    for (int i = 0; i < w * H; i++)
+        epdSendData(0x00);
 
     epdSendCommand(0x22);
     epdSendData(0xF7);
@@ -558,15 +559,14 @@ void epdDisplayFast(const uint8_t *image) {
         for (int i = 0; i < w; i++)
             epdSendData(image[i + j * w]);
 
-    epdSendCommand(0x26);  // Write RED RAM
-    for (int j = 0; j < H; j++)
-        for (int i = 0; i < w; i++)
-            epdSendData(image[i + j * w]);
+    epdSendCommand(0x26);  // Write RED RAM —— 三色屏 1=红，这里整片写 0
+    for (int i = 0; i < w * H; i++)
+        epdSendData(0x00);
 
     epdSendCommand(0x22);  // Display Update Control 2
     epdSendData(0xC7);     //   Fast update: skip LUT load (already loaded by InitFast)
     epdSendCommand(0x20);  // Activate Display Update Sequence
-    epdWaitBusy();
+    epdWaitBusy(30000);
 #endif
 }
 
